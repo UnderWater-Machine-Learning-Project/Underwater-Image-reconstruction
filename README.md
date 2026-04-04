@@ -11,3 +11,5 @@ Download karke project folder mein rakh do aur naam `fish_model.pt` rakh do.
 
 
 ![test_0013_compare](https://github.com/user-attachments/assets/3c5b73cc-bf6d-4d92-9b29-fd97be1f451b)
+
+![76787070_0](https://github.com/user-attachments/assets/e025fc0a-4c1b-46ae-a767-b8c97b2e5861)
