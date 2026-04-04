@@ -32,7 +32,7 @@ Output:
     outputs/<name>_compare.jpg  — side-by-side, clean boxes + species label
     Terminal                    — structured table per image with object metrics
 
-Author: [Your Name]
+
 """
 
 import cv2
