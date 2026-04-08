@@ -10,10 +10,38 @@ Two-stage pipeline:
         → Residual CLAHE + bilateral denoise + saturation restore
         See enhance.py for full technical detail.
 
+<<<<<<< HEAD
     Stage 2 — Detection     (always on raw original)
         fish_model.pt  —  15-class underwater species detector
         Two-pass tiled YOLO + two-stage NMS (per-class + cross-class)
         Metrics printed to terminal only; output image carries labels only.
+=======
+Stage 2 — Detection  (always on raw original)
+    Two-pass tiled YOLO with smart cross-class NMS.
+
+    Pass 1: full image — catches large and medium objects.
+    Pass 2: 640 px tiles at 20 % overlap — catches small fish that get
+            compressed below the detection threshold during full-frame resize.
+
+    NMS runs in two stages:
+      a) Per-class NMS  — removes tile duplicates of the same species.
+      b) Cross-class NMS — collapses generic 'fish' boxes onto overlapping
+         species-specific boxes. When the model fires both 'fish' (generic)
+         and 'chaetodontidae' (specific) on the same object, the specific
+         label wins. This eliminates the double-box artifact seen in earlier
+         runs without discarding any real detections.
+
+    Box validity filters:
+      • Area ≥ MIN_BOX_AREA        — removes sub-pixel noise
+      • Area ≤ 20 % of frame       — removes whole-scene false positives
+      • Aspect ratio ≤ 5 : 1       — removes non-fish-shaped artifacts
+
+Output:
+    outputs/<name>_compare.jpg  — side-by-side, clean boxes + species label
+    Terminal                    — structured table per image with object metrics
+
+
+>>>>>>> 3b829e87652acee27d503757c360a34ab76d94cf
 """
 
 import cv2
