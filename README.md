@@ -5,7 +5,19 @@
 
 Download karke project folder mein rakh do aur naam `fish_model.pt` rakh do.
 
-(Detection is still weak, don't get your knickers in a twist) 
+**2. SS-UIE Enhancement Model (Optional)**
+
+**Download:**
+[SS_UIE.pth (79 MB)](https://drive.google.com/file/d/1YxyagMCbApON8dRdiQTaQG65g3tnZkPt/view?usp=sharing)
+
+**Rename to:**  
+`SS_UIE.pth`
+
+**Place in:** root directory (same folder as `main.py`)
+
+**Note:**  
+Pipeline works perfectly without this model. Classical enhancement is used as automatic fallback.
+
 
 ![test_0032_compare](https://github.com/user-attachments/assets/e54e07ee-195e-4c78-bf02-dd5450522e56)
 
