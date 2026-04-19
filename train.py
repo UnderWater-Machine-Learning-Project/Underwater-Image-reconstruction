@@ -273,14 +273,14 @@ def plot_curves(epochs_ran, train_losses, val_psnrs, stopped_at, save_path):
 @ epoch {stopped_at}",
                  fontsize=8, color="gray")
 
-    fig.suptitle("Training Curve — U-Net + Swin Transformer", fontsize=13, fontweight="bold")
+    fig.suptitle("Training Curve - U-Net + Swin Transformer", fontsize=13, fontweight="bold")
     fig.tight_layout()
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower right", fontsize=9)
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  curve saved → {save_path}")
+    print(f"  curve saved -> {save_path}")
 
 
 # ── Train ──────────────────────────────────────────────────────────────────────
@@ -306,9 +306,9 @@ def train():
     np.save(os.path.join(WEIGHTS_DIR, "test_split.npy"),
             np.array([p[0] for p in test_pairs]))
 
-    print(f"Split  →  train: {len(train_pairs)}  |  val: {len(val_pairs)}  |  test: {len(test_pairs)}")
+    print(f"Split  ->  train: {len(train_pairs)}  |  val: {len(val_pairs)}  |  test: {len(test_pairs)}")
     print(f"Early stopping patience: {PATIENCE} epochs")
-    print(f"Test paths saved → {WEIGHTS_DIR}/test_split.npy")
+    print(f"Test paths saved -> {WEIGHTS_DIR}/test_split.npy")
 
     hp_tr, cp_tr = zip(*train_pairs)
     hp_va, cp_va = zip(*val_pairs)
@@ -390,7 +390,7 @@ def train():
         if epoch % SAVE_EVERY == 0:
             ckpt = os.path.join(WEIGHTS_DIR, f"unet_epoch_{epoch}.pth")
             torch.save(model.state_dict(), ckpt)
-            print(f"  checkpoint → {ckpt}")
+            print(f"  checkpoint -> {ckpt}")
 
         # Best model + early stopping counter
         if val_psnr > best_psnr:
@@ -405,7 +405,7 @@ def train():
                 stopped_at = epoch
                 print(f"\
 Early stopping triggered at epoch {epoch}.")
-                print(f"Best val PSNR was {best_psnr:.2f} dB — saved as unet_final.pth")
+                print(f"Best val PSNR was {best_psnr:.2f} dB -- saved as unet_final.pth")
                 break
 
     csv_file.close()
