@@ -1,0 +1,3 @@
+n01664065_19082.jpg  hist_corr=0.074  orb_match=0.033
+n02606052_6967.jpg  hist_corr=-0.062  orb_match=0.0
+n02607072_13430.jpg  hist_corr=0.035  orb_match=0.0

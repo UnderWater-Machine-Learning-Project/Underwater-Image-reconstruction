@@ -31,6 +31,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
+from torchvision import models
 from unet import UNet
 
 
@@ -42,11 +43,11 @@ HAZY_DIR     = os.path.join(DATASET_DIR, "hazy")
 CLEAR_DIR    = os.path.join(DATASET_DIR, "clear")
 
 EPOCHS       = 100     # max epochs — early stopping will cut this short
-BATCH_SIZE   = 4       # reduce to 2 if GPU OOM, 1 for CPU
+BATCH_SIZE   = 2       # reduced for 384 crops — increase if GPU allows
 LR           = 1e-4
-IMG_SIZE     = 256     # training crop size — must be multiple of 16
+IMG_SIZE     = 384     # larger crops for better global context — must be multiple of 16
 SAVE_EVERY   = 5       # save numbered checkpoint every N epochs
-PATIENCE     = 8       # early stopping: halt after N epochs with no val PSNR improvement
+PATIENCE     = 15      # early stopping: halt after N epochs with no val PSNR improvement
 
 TRAIN_SPLIT  = 0.80
 VAL_SPLIT    = 0.10
@@ -69,10 +70,11 @@ class UnderwaterDataset(Dataset):
         return len(self.pairs)
 
     def _degrade(self, img):
+        """Simulate underwater physics: wavelength-dependent attenuation + haze."""
         img = img.astype(np.float32) / 255.0
-        img[:, :, 0] *= 0.6
-        img[:, :, 1] *= 0.85
-        img[:, :, 2]  = np.clip(img[:, :, 2] * 1.1 + 0.05, 0, 1)
+        img[:, :, 0] *= np.random.uniform(0.4, 0.7)   # R — most absorbed
+        img[:, :, 1] *= np.random.uniform(0.7, 0.9)   # G — partially absorbed
+        img[:, :, 2]  = np.clip(img[:, :, 2] * np.random.uniform(1.0, 1.2) + 0.05, 0, 1)  # B — boosted
         haze = np.random.uniform(0.05, 0.25)
         img  = img * (1 - haze) + haze
         return np.clip(img * 255, 0, 255).astype(np.uint8)
@@ -86,6 +88,15 @@ class UnderwaterDataset(Dataset):
             img = self._degrade(img)
         return img
 
+    def _random_scale(self, hazy, clear):
+        """Random scale both images by 0.8–1.2x (applied before crop)."""
+        scale = np.random.uniform(0.8, 1.2)
+        h, w  = hazy.shape[:2]
+        new_h, new_w = int(h * scale), int(w * scale)
+        hazy  = cv2.resize(hazy,  (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        clear = cv2.resize(clear, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        return hazy, clear
+
     def _random_crop(self, hazy, clear, size):
         h, w = hazy.shape[:2]
         if h < size or w < size:
@@ -96,6 +107,34 @@ class UnderwaterDataset(Dataset):
         left = np.random.randint(0, w - size + 1)
         return (hazy [top:top+size, left:left+size],
                 clear[top:top+size, left:left+size])
+
+    def _center_crop(self, hazy, clear, size):
+        """Deterministic center crop — avoids edge bias."""
+        h, w = hazy.shape[:2]
+        if h < size or w < size:
+            hazy  = cv2.resize(hazy,  (max(w, size), max(h, size)))
+            clear = cv2.resize(clear, (max(w, size), max(h, size)))
+            h, w  = hazy.shape[:2]
+        top  = (h - size) // 2
+        left = (w - size) // 2
+        return (hazy [top:top+size, left:left+size],
+                clear[top:top+size, left:left+size])
+
+    def _color_jitter(self, img):
+        """Random brightness/contrast shift — applied to hazy input only."""
+        img = img.astype(np.float32)
+        # Brightness: shift by ±0.1 * 255
+        img += np.random.uniform(-0.1, 0.1) * 255.0
+        # Contrast: scale by 0.9–1.1
+        mean = img.mean()
+        img  = (img - mean) * np.random.uniform(0.9, 1.1) + mean
+        return np.clip(img, 0, 255).astype(np.uint8)
+
+    def _add_noise(self, img):
+        """Add Gaussian noise (std 0.01–0.03) — applied to hazy input only."""
+        std   = np.random.uniform(0.01, 0.03)
+        noise = np.random.randn(*img.shape).astype(np.float32) * std
+        return np.clip(img / 255.0 + noise, 0, 1) * 255.0
 
     def _augment(self, hazy, clear):
         if np.random.rand() > 0.5:
@@ -111,9 +150,17 @@ class UnderwaterDataset(Dataset):
         hp, cp  = self.pairs[idx]
         hazy    = self._load(hp, is_hazy=True)
         clear   = self._load(cp, is_hazy=False)
-        hazy, clear = self._random_crop(hazy, clear, self.img_size)
+        if self.augment:
+            hazy, clear = self._random_scale(hazy, clear)
+        # 70% random crops, 30% center crops — reduces edge bias
+        if self.augment and np.random.rand() < 0.3:
+            hazy, clear = self._center_crop(hazy, clear, self.img_size)
+        else:
+            hazy, clear = self._random_crop(hazy, clear, self.img_size)
         if self.augment:
             hazy, clear = self._augment(hazy, clear)
+            hazy = self._color_jitter(hazy)
+            hazy = self._add_noise(hazy).astype(np.uint8)
         hazy_t  = torch.from_numpy(hazy.astype(np.float32)  / 255.0).permute(2, 0, 1)
         clear_t = torch.from_numpy(clear.astype(np.float32) / 255.0).permute(2, 0, 1)
         return hazy_t, clear_t
@@ -121,11 +168,28 @@ class UnderwaterDataset(Dataset):
 
 # ── Loss ───────────────────────────────────────────────────────────────────────
 
-class CombinedLoss(nn.Module):
-    def __init__(self, alpha=0.8):
+class VGGPerceptualLoss(nn.Module):
+    """VGG16 feature-space L1 loss for sharper, perceptually better outputs."""
+    def __init__(self):
         super().__init__()
-        self.alpha = alpha
-        self.l1    = nn.L1Loss()
+        vgg = models.vgg16(weights=models.VGG16_Weights.DEFAULT)
+        self.features = nn.Sequential(*list(vgg.features[:16]))
+        for p in self.features.parameters():
+            p.requires_grad = False
+        self.l1 = nn.L1Loss()
+
+    def forward(self, pred, target):
+        return self.l1(self.features(pred), self.features(target))
+
+
+class CombinedLoss(nn.Module):
+    def __init__(self, w_l1=0.5, w_ssim=0.3, w_percep=0.2):
+        super().__init__()
+        self.w_l1     = w_l1
+        self.w_ssim   = w_ssim
+        self.w_percep = w_percep
+        self.l1       = nn.L1Loss()
+        self.percep   = VGGPerceptualLoss()
 
     def _ssim(self, x, y, window_size=11):
         C1, C2 = 0.01**2, 0.03**2
@@ -140,7 +204,10 @@ class CombinedLoss(nn.Module):
         return (num / (den + 1e-8)).mean()
 
     def forward(self, pred, target):
-        return self.alpha * self.l1(pred, target) + (1-self.alpha) * (1.0 - self._ssim(pred, target))
+        loss_l1     = self.l1(pred, target)
+        loss_ssim   = 1.0 - self._ssim(pred, target)
+        loss_percep = self.percep(pred, target)
+        return self.w_l1 * loss_l1 + self.w_ssim * loss_ssim + self.w_percep * loss_percep
 
 
 # ── PSNR ───────────────────────────────────────────────────────────────────────
@@ -255,9 +322,10 @@ def train():
 
     model     = UNet(base=64).to(DEVICE)
     total     = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    criterion = CombinedLoss(alpha=0.8)
+    criterion = CombinedLoss(w_l1=0.5, w_ssim=0.3, w_percep=0.2).to(DEVICE)
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=3, min_lr=1e-6)
 
     print(f"Parameters : {total:,}")
     print(f"Device     : {DEVICE}")
@@ -299,10 +367,10 @@ def train():
                 hazy_b, clear_b = hazy_b.to(DEVICE), clear_b.to(DEVICE)
                 val_psnr += psnr(model(hazy_b), clear_b)
         val_psnr /= len(val_dl)
-        scheduler.step()
+        scheduler.step(val_psnr)
 
         swin_alpha = model.swin.alpha.item()
-        lr_now     = scheduler.get_last_lr()[0]
+        lr_now     = optimizer.param_groups[0]['lr']
 
         print(f"Epoch [{epoch:>3}/{EPOCHS}]  loss={train_loss:.4f}  "
               f"val_psnr={val_psnr:.2f} dB  swin_alpha={swin_alpha:.4f}  "

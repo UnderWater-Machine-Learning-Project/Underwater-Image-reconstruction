@@ -191,9 +191,9 @@ class SwinBottleneck(nn.Module):
         Block 1 (W-MSA):  attends within non-overlapping windows — local haze patterns
         Block 2 (SW-MSA): shifts windows by half — cross-window connections — global scene
 
-    Alpha gate (starts at 0):
+    Alpha gate (starts at 0.1):
         output = CNN_features + alpha × Swin_features
-        Safe initialization: model trains as plain U-Net until Swin learns to contribute.
+        Warm start: Swin contributes from epoch 1 so gradients flow immediately.
 
     window_size=4 at bottleneck:
         For 256×256 input, bottleneck is 16×16.
@@ -209,7 +209,7 @@ class SwinBottleneck(nn.Module):
         self.block_sw = SwinBlock(channels, num_heads, window_size,
                                   shift_size=window_size//2, dropout=dropout)
         self.out_proj = nn.Linear(channels, channels)
-        self.alpha    = nn.Parameter(torch.zeros(1))   # off at init
+        self.alpha    = nn.Parameter(torch.tensor([0.1]))   # warm start
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -244,6 +244,7 @@ class UNet(nn.Module):
         self.enc3 = _ConvBlock(b*2,   b*4)
         self.enc4 = _ConvBlock(b*4,   b*8)
         self.pool = nn.MaxPool2d(2)
+        self.enc_drop = nn.Dropout2d(p=0.1)   # spatial dropout after each encoder block
 
         # Bottleneck + Swin
         self.bottleneck = _ConvBlock(b*8, b*16)
@@ -271,10 +272,10 @@ class UNet(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        e1 = self.enc1(x)
-        e2 = self.enc2(self.pool(e1))
-        e3 = self.enc3(self.pool(e2))
-        e4 = self.enc4(self.pool(e3))
+        e1 = self.enc_drop(self.enc1(x))
+        e2 = self.enc_drop(self.enc2(self.pool(e1)))
+        e3 = self.enc_drop(self.enc3(self.pool(e2)))
+        e4 = self.enc_drop(self.enc4(self.pool(e3)))
 
         b  = self.bottleneck(self.pool(e4))
         b  = self.swin(b)                         # ← Swin here
