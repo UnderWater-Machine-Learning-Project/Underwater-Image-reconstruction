@@ -224,7 +224,8 @@ class SwinBottleneck(nn.Module):
         # Back to (B, C, H, W)
         out = out.permute(0, 3, 1, 2).contiguous()
 
-        return x + self.alpha * out   # alpha gate
+        alpha = torch.clamp(self.alpha, min=0.05)   # floor prevents collapse
+        return x + alpha * out   # alpha gate
 
 
 # ── Full U-Net + Swin ──────────────────────────────────────────────────────────

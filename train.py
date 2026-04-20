@@ -47,7 +47,7 @@ BATCH_SIZE   = 2       # reduced for 384 crops — increase if GPU allows
 LR           = 1e-4
 IMG_SIZE     = 384     # larger crops for better global context — must be multiple of 16
 SAVE_EVERY   = 5       # save numbered checkpoint every N epochs
-PATIENCE     = 15      # early stopping: halt after N epochs with no val PSNR improvement
+PATIENCE     = 20      # early stopping: halt after N epochs with no val PSNR improvement
 
 TRAIN_SPLIT  = 0.80
 VAL_SPLIT    = 0.10
@@ -61,10 +61,11 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class UnderwaterDataset(Dataset):
     SYNTHETIC = False   # set True if you only have clear images, no hazy pairs
 
-    def __init__(self, hazy_paths, clear_paths, img_size=256, augment=True):
-        self.pairs    = list(zip(hazy_paths, clear_paths))
-        self.img_size = img_size
-        self.augment  = augment
+    def __init__(self, hazy_paths, clear_paths, img_size=256, augment=True, full_image=False):
+        self.pairs      = list(zip(hazy_paths, clear_paths))
+        self.img_size   = img_size
+        self.augment    = augment
+        self.full_image = full_image   # resize to img_size instead of cropping (for stable val)
 
     def __len__(self):
         return len(self.pairs)
@@ -152,8 +153,12 @@ class UnderwaterDataset(Dataset):
         clear   = self._load(cp, is_hazy=False)
         if self.augment:
             hazy, clear = self._random_scale(hazy, clear)
+        # Full-image mode: deterministic resize — same pixels every epoch (for val)
+        if self.full_image:
+            hazy  = cv2.resize(hazy,  (self.img_size, self.img_size))
+            clear = cv2.resize(clear, (self.img_size, self.img_size))
         # 70% random crops, 30% center crops — reduces edge bias
-        if self.augment and np.random.rand() < 0.3:
+        elif self.augment and np.random.rand() < 0.3:
             hazy, clear = self._center_crop(hazy, clear, self.img_size)
         else:
             hazy, clear = self._random_crop(hazy, clear, self.img_size)
@@ -173,7 +178,7 @@ class VGGPerceptualLoss(nn.Module):
     def __init__(self):
         super().__init__()
         vgg = models.vgg16(weights=models.VGG16_Weights.DEFAULT)
-        self.features = nn.Sequential(*list(vgg.features[:16]))
+        self.features = nn.Sequential(*list(vgg.features[:23]))  # relu4_3 — deeper structural features
         for p in self.features.parameters():
             p.requires_grad = False
         self.l1 = nn.L1Loss()
@@ -317,15 +322,22 @@ def train():
         UnderwaterDataset(hp_tr, cp_tr, IMG_SIZE, augment=True),
         batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
     val_dl = DataLoader(
-        UnderwaterDataset(hp_va, cp_va, IMG_SIZE, augment=False),
+        UnderwaterDataset(hp_va, cp_va, IMG_SIZE, augment=False, full_image=True),
         batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
     model     = UNet(base=64).to(DEVICE)
     total     = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    criterion = CombinedLoss(w_l1=0.5, w_ssim=0.3, w_percep=0.2).to(DEVICE)
-    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    criterion = CombinedLoss(w_l1=0.4, w_ssim=0.3, w_percep=0.3).to(DEVICE)
+
+    # Separate LR for swin_alpha — 10× slower so it doesn't race to zero
+    alpha_params = [model.swin.alpha]
+    base_params  = [p for p in model.parameters() if p is not model.swin.alpha]
+    optimizer    = optim.AdamW([
+        {'params': base_params,  'lr': LR,       'weight_decay': 1e-4},
+        {'params': alpha_params, 'lr': LR * 0.1, 'weight_decay': 0},
+    ])
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=3, min_lr=1e-6)
+        optimizer, mode='max', factor=0.5, patience=5, min_lr=1e-6)
 
     print(f"Parameters : {total:,}")
     print(f"Device     : {DEVICE}")
@@ -367,24 +379,25 @@ def train():
                 hazy_b, clear_b = hazy_b.to(DEVICE), clear_b.to(DEVICE)
                 val_psnr += psnr(model(hazy_b), clear_b)
         val_psnr /= len(val_dl)
-        scheduler.step(val_psnr)
+        # Track history for curve (must be before running avg calculation)
+        hist_epochs.append(epoch)
+        hist_loss.append(train_loss)
+        hist_psnr.append(val_psnr)
+        # Use 3-epoch running average for smoother LR/early-stop decisions
+        avg_psnr = np.mean(hist_psnr[-3:])
+        scheduler.step(avg_psnr)
 
         swin_alpha = model.swin.alpha.item()
         lr_now     = optimizer.param_groups[0]['lr']
 
         print(f"Epoch [{epoch:>3}/{EPOCHS}]  loss={train_loss:.4f}  "
-              f"val_psnr={val_psnr:.2f} dB  swin_alpha={swin_alpha:.4f}  "
-              f"lr={lr_now:.2e}")
+              f"val_psnr={val_psnr:.2f} dB  avg3={avg_psnr:.2f}  "
+              f"swin_alpha={swin_alpha:.4f}  lr={lr_now:.2e}")
 
         # Log to CSV
         csv_writer.writerow([epoch, round(train_loss, 6),
                               round(val_psnr, 4), round(swin_alpha, 6), lr_now])
         csv_file.flush()
-
-        # Track history for curve
-        hist_epochs.append(epoch)
-        hist_loss.append(train_loss)
-        hist_psnr.append(val_psnr)
 
         # Numbered checkpoint
         if epoch % SAVE_EVERY == 0:
@@ -393,14 +406,14 @@ def train():
             print(f"  checkpoint -> {ckpt}")
 
         # Best model + early stopping counter
-        if val_psnr > best_psnr:
-            best_psnr      = val_psnr
+        if avg_psnr > best_psnr:
+            best_psnr      = avg_psnr
             epochs_no_impv = 0
             torch.save(model.state_dict(),
                        os.path.join(WEIGHTS_DIR, "unet_final.pth"))
         else:
             epochs_no_impv += 1
-            print(f"  no improvement ({epochs_no_impv}/{PATIENCE})")
+            print(f"  no improvement ({epochs_no_impv}/{PATIENCE})  [avg_psnr={avg_psnr:.2f}]")
             if epochs_no_impv >= PATIENCE:
                 stopped_at = epoch
                 print(f"\
