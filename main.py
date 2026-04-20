@@ -1,42 +1,50 @@
 """
 Underwater Image Enhancement and Species Detection
 ===================================================
-Two-stage pipeline:
+Three-stage pipeline:
 
-    Stage 1 — Enhancement   (right panel, display only)
-        U-Net + ViT bottleneck (custom trained) neural base
-        → LAB correction + CLAHE + MSR blend (classical fallback)
-        → UDCP dehazing (Underwater Dark Channel Prior, R+G only)
-        → Unsharp mask + bilateral denoise + saturation restore
-        See enhance.py for full technical detail.
+    Stage 1 -- Classical Preprocessing (preprocess.py)
+        Gray World White Balance -> UDCP Dehazing -> CLAHE -> Sharpen
+        Same module used for training dataset preparation.
 
-    Stage 2 — Detection  (always on raw original)
+    Stage 2 -- Neural Enhancement (enhance.py)
+        Preprocessed image -> U-Net + Swin Transformer -> Enhanced output
+        Post-processing: bilateral denoise + saturation restore
+
+    Stage 3 -- Detection (this file)
+        Enhanced image -> YOLO -> Fish/species detections
         Two-pass tiled YOLO with smart cross-class NMS.
 
-        Pass 1: full image — catches large and medium objects.
-        Pass 2: 640 px tiles at 20% overlap — catches small fish that get
+        Pass 1: full image -- catches large and medium objects.
+        Pass 2: 640 px tiles at 20% overlap -- catches small fish that get
                 compressed below the detection threshold during full-frame resize.
 
         NMS runs in two stages:
-          a) Per-class NMS  — removes tile duplicates of the same species.
-          b) Cross-class NMS — collapses generic 'fish' boxes onto overlapping
+          a) Per-class NMS  -- removes tile duplicates of the same species.
+          b) Cross-class NMS -- collapses generic 'fish' boxes onto overlapping
              species-specific boxes. When the model fires both 'fish' (generic)
              and 'chaetodontidae' (specific) on the same object, the specific
              label wins.
 
         Box validity filters:
-          • Area >= MIN_BOX_AREA        — removes sub-pixel noise
-          • Area <= 20% of frame        — removes whole-scene false positives
-          • Aspect ratio <= 5:1         — removes non-fish-shaped artifacts
+          - Area >= MIN_BOX_AREA        -- removes sub-pixel noise
+          - Area <= 20% of frame        -- removes whole-scene false positives
+          - Aspect ratio <= 5:1         -- removes non-fish-shaped artifacts
+
+Usage:
+    python main.py                      # detect on enhanced (default)
+    python main.py --detect-on raw      # detect on raw original
+    python main.py --detect-on both     # compare raw vs enhanced detections
 
 Output:
-    outputs/<name>_compare.jpg  — side-by-side, clean boxes + species label
-    Terminal                    — structured table per image with object metrics
+    outputs/<name>_compare.jpg  -- side-by-side, clean boxes + species label
+    Terminal                    -- structured table per image with object metrics
 """
 
 import cv2
 import numpy as np
 import os
+import argparse
 
 from enhance import enhance, load_unet, load_waternet
 
@@ -182,30 +190,27 @@ def _draw(img, dets):
     out = img.copy()
     for lbl, _, (x1, y1, x2, y2) in dets:
         cv2.rectangle(out, (x1,y1), (x2,y2), BOX_COLOR, 2)
-        (tw, th), _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
-        top = max(0, y1 - th - 6)
-        cv2.rectangle(out, (x1, top), (x1+tw+6, y1), BOX_COLOR, -1)
-        cv2.putText(out, lbl, (x1+3, y1-3),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, LABEL_COLOR, 1, cv2.LINE_AA)
-    return out
+        (tw, th), _ = cv2.getTex# -- Pipeline -------------------------------------------------------------------
 
-
-def _comparison(orig, enh, dets):
-    sep = np.full((orig.shape[0], 5, 3), 15, dtype=np.uint8)
-    return np.hstack([_draw(orig, dets), sep, _draw(enh, dets)])
-
-
-# ── Pipeline ───────────────────────────────────────────────────────────────────
-
-def process(path, yolo_model, unet_bundle, waternet_bundle):
+def process(path, yolo_model, unet_bundle, waternet_bundle, detect_on="enhanced"):
     img = cv2.imread(path)
     if img is None: print(f"[error] cannot read {path}"); return
     filename = os.path.basename(path)
 
-    enh  = enhance(img, unet_bundle=unet_bundle, waternet_bundle=waternet_bundle)
-    dets = detect(yolo_model, img)
+    enh = enhance(img, unet_bundle=unet_bundle, waternet_bundle=waternet_bundle)
 
-    print_results(filename, dets)
+    if detect_on == "both":
+        dets_raw = detect(yolo_model, img)
+        dets_enh = detect(yolo_model, enh)
+        print_results(f"{filename} [RAW]", dets_raw)
+        print_results(f"{filename} [ENHANCED]", dets_enh)
+        dets = dets_enh   # use enhanced for saved output
+    elif detect_on == "raw":
+        dets = detect(yolo_model, img)
+        print_results(filename, dets)
+    else:   # "enhanced" (default)
+        dets = detect(yolo_model, enh)
+        print_results(filename, dets)
 
     stem     = os.path.splitext(filename)[0]
     out_path = os.path.join(OUTPUT_FOLDER, f"{stem}_compare.jpg")
@@ -215,6 +220,13 @@ def process(path, yolo_model, unet_bundle, waternet_bundle):
 
 def main():
     from ultralytics import YOLO
+
+    parser = argparse.ArgumentParser(
+        description="Underwater Enhancement + Detection Pipeline")
+    parser.add_argument("--detect-on", choices=["raw", "enhanced", "both"],
+                        default="enhanced",
+                        help="Run YOLO on raw, enhanced, or both (default: enhanced).")
+    args = parser.parse_args()
 
     print("" + "="*60)
     print("  Underwater Enhancement + Detection Pipeline")
@@ -231,9 +243,28 @@ def main():
     yolo_model = YOLO(MODEL_PATH)
     sample     = yolo_model(np.zeros((64, 64, 3), dtype=np.uint8), verbose=False)[0]
 
-    print(f"detector : {MODEL_PATH}")
-    print(f"species  : {list(sample.names.values())}")
-    print(f"enhance  : {mode}")
+    print(f"detector   : {MODEL_PATH}")
+    print(f"species    : {list(sample.names.values())}")
+    print(f"enhance    : {mode}")
+    print(f"detect on  : {args.detect_on}")
+    print(f"conf={CONF_THRESH}  iou={IOU_THRESH}  tile_overlap={int(TILE_OVERLAP*100)}%")
+
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    images = sorted(f for f in os.listdir(IMAGE_FOLDER)
+                    if f.lower().endswith((".jpg", ".jpeg", ".png")))
+    if not images:
+        print(f"no images in '{IMAGE_FOLDER}/'"); return
+
+    for fname in images:
+        process(os.path.join(IMAGE_FOLDER, fname),
+                yolo_model, unet_bundle, waternet_bundle,
+                detect_on=args.detect_on)
+
+    print(f"finished -- {len(images)} image(s) -> '{OUTPUT_FOLDER}/'")
+
+
+if __name__ == "__main__":
+    main()ode}")
     print(f"conf={CONF_THRESH}  iou={IOU_THRESH}  tile_overlap={int(TILE_OVERLAP*100)}%")
 
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)

@@ -37,10 +37,11 @@ from unet import UNet
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-DATASET_DIR  = "dataset"
-WEIGHTS_DIR  = "weights"
-HAZY_DIR     = os.path.join(DATASET_DIR, "hazy")
-CLEAR_DIR    = os.path.join(DATASET_DIR, "clear")
+DATASET_DIR    = "dataset"
+WEIGHTS_DIR    = "weights"
+HAZY_DIR       = os.path.join(DATASET_DIR, "hazy")
+CLEAR_DIR      = os.path.join(DATASET_DIR, "clear")
+PREPROCESS_DIR = os.path.join(DATASET_DIR, "preprocessed")
 
 EPOCHS       = 100     # max epochs — early stopping will cut this short
 BATCH_SIZE   = 2       # reduced for 384 crops — increase if GPU allows
@@ -224,9 +225,10 @@ def psnr(pred, target):
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def get_pairs(hazy_dir, clear_dir):
+def get_pairs(input_dir, clear_dir):
+    """Find matched input/clear pairs. input_dir can be hazy/ or preprocessed/."""
     exts  = {".jpg", ".jpeg", ".png"}
-    files = sorted(f for f in os.listdir(hazy_dir)
+    files = sorted(f for f in os.listdir(input_dir)
                    if os.path.splitext(f)[1].lower() in exts)
     pairs = []
     for f in files:
@@ -234,7 +236,7 @@ def get_pairs(hazy_dir, clear_dir):
         for ext in exts:
             cp = os.path.join(clear_dir, stem + ext)
             if os.path.exists(cp):
-                pairs.append((os.path.join(hazy_dir, f), cp))
+                pairs.append((os.path.join(input_dir, f), cp))
                 break
     return pairs
 
@@ -293,11 +295,21 @@ def plot_curves(epochs_ran, train_losses, val_psnrs, stopped_at, save_path):
 def train():
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
-    pairs = get_pairs(HAZY_DIR, CLEAR_DIR)
+    # Auto-detect preprocessed dataset (preferred) or fall back to raw hazy
+    if os.path.isdir(PREPROCESS_DIR) and len(os.listdir(PREPROCESS_DIR)) > 0:
+        input_dir = PREPROCESS_DIR
+        input_src = "preprocessed (WB+UDCP+CLAHE+Sharpen)"
+    else:
+        input_dir = HAZY_DIR
+        input_src = "raw hazy (no preprocessing)"
+
+    pairs = get_pairs(input_dir, CLEAR_DIR)
     if not pairs:
-        print(f"[error] No paired images found in {HAZY_DIR} / {CLEAR_DIR}")
+        print(f"[error] No paired images found in {input_dir} / {CLEAR_DIR}")
         return
 
+    print(f"Input source: {input_src}")
+    print(f"Input dir   : {input_dir}")
     print(f"Total pairs : {len(pairs)}")
     np.random.seed(42)
     np.random.shuffle(pairs)
