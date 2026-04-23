@@ -32,7 +32,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 from torchvision import models
-from unet import UNet
+from nafnet_vit import nafnet_vit_base
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -44,9 +44,9 @@ CLEAR_DIR      = os.path.join(DATASET_DIR, "clear")
 PREPROCESS_DIR = os.path.join(DATASET_DIR, "preprocessed")
 
 EPOCHS       = 100     # max epochs — early stopping will cut this short
-BATCH_SIZE   = 2       # reduced for 384 crops — increase if GPU allows
-LR           = 1e-4
-IMG_SIZE     = 384     # larger crops for better global context — must be multiple of 16
+BATCH_SIZE   = 8       # NAFNet is lighter per param
+LR           = 1e-3    # NAFNet trains better at higher LR
+IMG_SIZE     = 256     # NAFNet paper trains at 256
 SAVE_EVERY   = 5       # save numbered checkpoint every N epochs
 PATIENCE     = 20      # early stopping: halt after N epochs with no val PSNR improvement
 
@@ -337,19 +337,13 @@ def train():
         UnderwaterDataset(hp_va, cp_va, IMG_SIZE, augment=False, full_image=True),
         batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
-    model     = UNet(base=64).to(DEVICE)
+    model     = nafnet_vit_base().to(DEVICE)
     total     = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    criterion = CombinedLoss(w_l1=0.4, w_ssim=0.3, w_percep=0.3).to(DEVICE)
+    criterion = CombinedLoss(w_l1=0.5, w_ssim=0.5, w_percep=0.0).to(DEVICE)
 
-    # Separate LR for swin_alpha — 10× slower so it doesn't race to zero
-    alpha_params = [model.swin.alpha]
-    base_params  = [p for p in model.parameters() if p is not model.swin.alpha]
-    optimizer    = optim.AdamW([
-        {'params': base_params,  'lr': LR,       'weight_decay': 1e-4},
-        {'params': alpha_params, 'lr': LR * 0.1, 'weight_decay': 0},
-    ])
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=5, min_lr=1e-6)
+    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=EPOCHS, eta_min=1e-6)
 
     print(f"Parameters : {total:,}")
     print(f"Device     : {DEVICE}")
@@ -359,7 +353,7 @@ def train():
     csv_path = os.path.join(WEIGHTS_DIR, "training_log.csv")
     csv_file = open(csv_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(["epoch", "train_loss", "val_psnr", "swin_alpha", "lr"])
+    csv_writer.writerow(["epoch", "train_loss", "val_psnr", "lr"])
 
     # ── Tracking ───────────────────────────────────────────────────────────────
     best_psnr       = 0.0
@@ -395,20 +389,19 @@ def train():
         hist_epochs.append(epoch)
         hist_loss.append(train_loss)
         hist_psnr.append(val_psnr)
-        # Use 3-epoch running average for smoother LR/early-stop decisions
+        # Use 3-epoch running average for early-stop decisions
         avg_psnr = np.mean(hist_psnr[-3:])
-        scheduler.step(avg_psnr)
+        scheduler.step()
 
-        swin_alpha = model.swin.alpha.item()
         lr_now     = optimizer.param_groups[0]['lr']
 
         print(f"Epoch [{epoch:>3}/{EPOCHS}]  loss={train_loss:.4f}  "
               f"val_psnr={val_psnr:.2f} dB  avg3={avg_psnr:.2f}  "
-              f"swin_alpha={swin_alpha:.4f}  lr={lr_now:.2e}")
+              f"lr={lr_now:.2e}")
 
         # Log to CSV
         csv_writer.writerow([epoch, round(train_loss, 6),
-                              round(val_psnr, 4), round(swin_alpha, 6), lr_now])
+                              round(val_psnr, 4), lr_now])
         csv_file.flush()
 
         # Numbered checkpoint
