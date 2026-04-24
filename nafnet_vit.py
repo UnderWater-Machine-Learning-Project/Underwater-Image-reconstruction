@@ -174,31 +174,32 @@ class ViTBottleneck(nn.Module):
                  num_heads: int = 8, mlp_ratio: float = 4.0,
                  dropout: float = 0.1):
         super().__init__()
-        self.c    = c
-        self.pos  = None               # cached positional embedding
-        self._hw  = None               # (H, W) for which pos was created
-
+        self.c = c
         self.blocks = nn.ModuleList([
             _ViTBlock(c, num_heads, mlp_ratio, dropout)
             for _ in range(depth)
         ])
         self.norm = nn.LayerNorm(c)
+        # pos_embed registered here so optimizer tracks it from step 1
+        # and state_dict() saves/loads it correctly.
+        # Default: 256px input -> bottleneck 16x16 = 256 tokens.
+        # Interpolated automatically if spatial size differs at runtime.
+        self.pos_embed = nn.Parameter(torch.zeros(1, 256, c))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
-    def _get_pos(self, H: int, W: int, device: torch.device) -> torch.Tensor:
-        """Return (1, H*W, C) learnable positional embedding."""
-        if self._hw != (H, W) or self.pos is None:
-            self.pos  = nn.Parameter(
-                torch.zeros(1, H * W, self.c, device=device))
-            nn.init.trunc_normal_(self.pos, std=0.02)
-            self._hw  = (H, W)
-        return self.pos.to(device)
+    def _get_pos(self, N: int) -> torch.Tensor:
+        """Return (1, N, C) positional embedding, interpolating if N != 256."""
+        if N == self.pos_embed.shape[1]:
+            return self.pos_embed
+        # (1, C, 256) -> interpolate -> (1, C, N) -> (1, N, C)
+        pos = self.pos_embed.transpose(1, 2)
+        pos = F.interpolate(pos, size=N, mode="linear", align_corners=False)
+        return pos.transpose(1, 2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
-
-        # (B, C, H, W) → (B, N, C)
-        seq = x.flatten(2).transpose(1, 2)                     # B, N, C
-        seq = seq + self._get_pos(H, W, x.device)
+        seq = x.flatten(2).transpose(1, 2)                     # (B, N, C)
+        seq = seq + self._get_pos(H * W)
 
         for blk in self.blocks:
             seq = blk(seq)
@@ -328,26 +329,28 @@ class NAFNetViT(nn.Module):
         )
 
         # ── Decoder ───────────────────────────────────────────────────────
-        # Each upsample halves channels; skip connection doubles them again.
-        self.up4   = _Upsample(btn_ch)              # btn_ch → btn_ch//2 = ch[3]
-        self.dec4  = nn.Sequential(*[NAFBlock(ch[3] * 2, dropout=dropout)
+        # Order: upsample → cat(skip) → fuse (compress to ch[i]) → NAFBlocks
+        # Fuse BEFORE NAFBlocks so the blocks operate at ch[i], not ch[i]*2.
+        # This halves the compute per decoder block.
+        self.up4   = _Upsample(btn_ch)              # btn_ch → ch[3]
+        self.fuse4 = nn.Conv2d(ch[3] * 2, ch[3], 1, bias=True)  # cat -> ch[3]
+        self.dec4  = nn.Sequential(*[NAFBlock(ch[3], dropout=dropout)
                                      for _ in range(dec_blocks[3])])
-        self.fuse4 = nn.Conv2d(ch[3] * 2, ch[3], 1, bias=True)
 
         self.up3   = _Upsample(ch[3])               # ch[3] → ch[2]
-        self.dec3  = nn.Sequential(*[NAFBlock(ch[2] * 2, dropout=dropout)
-                                     for _ in range(dec_blocks[2])])
         self.fuse3 = nn.Conv2d(ch[2] * 2, ch[2], 1, bias=True)
+        self.dec3  = nn.Sequential(*[NAFBlock(ch[2], dropout=dropout)
+                                     for _ in range(dec_blocks[2])])
 
         self.up2   = _Upsample(ch[2])               # ch[2] → ch[1]
-        self.dec2  = nn.Sequential(*[NAFBlock(ch[1] * 2, dropout=dropout)
-                                     for _ in range(dec_blocks[1])])
         self.fuse2 = nn.Conv2d(ch[1] * 2, ch[1], 1, bias=True)
+        self.dec2  = nn.Sequential(*[NAFBlock(ch[1], dropout=dropout)
+                                     for _ in range(dec_blocks[1])])
 
         self.up1   = _Upsample(ch[1])               # ch[1] → ch[0]
-        self.dec1  = nn.Sequential(*[NAFBlock(ch[0] * 2, dropout=dropout)
-                                     for _ in range(dec_blocks[0])])
         self.fuse1 = nn.Conv2d(ch[0] * 2, ch[0], 1, bias=True)
+        self.dec1  = nn.Sequential(*[NAFBlock(ch[0], dropout=dropout)
+                                     for _ in range(dec_blocks[0])])
 
         # ── Output projection ─────────────────────────────────────────────
         self.output = nn.Conv2d(ch[0], out_ch, 3, padding=1, bias=True)
@@ -377,19 +380,13 @@ class NAFNetViT(nn.Module):
         # Bottleneck (ViT — full global self-attention)
         b  = self.bottleneck(self.down4(e4))   # (B, btn_ch, H/16, W/16)
 
-        # Decoder (upsample → concat skip → NAFBlocks → fuse to correct width)
-        # up4: btn_ch → btn_ch//2 = ch[3].  cat with e4 (ch[3]) → ch[3]*2
-        d4 = self.dec4(torch.cat([self.up4(b),  e4], dim=1))   # → ch[3]*2
-        d4 = self.fuse4(d4)                                     # → ch[3]
-
-        d3 = self.dec3(torch.cat([self.up3(d4), e3], dim=1))   # → ch[2]*2
-        d3 = self.fuse3(d3)                                     # → ch[2]
-
-        d2 = self.dec2(torch.cat([self.up2(d3), e2], dim=1))   # → ch[1]*2
-        d2 = self.fuse2(d2)                                     # → ch[1]
-
-        d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))   # → ch[0]*2
-        d1 = self.fuse1(d1)                                     # → ch[0]
+        # Decoder: upsample → cat(skip) → fuse → NAFBlocks
+        # fuse compresses cat channels back to ch[i] BEFORE NAFBlocks,
+        # so each block operates at ch[i] not ch[i]*2 (half the compute).
+        d4 = self.dec4(self.fuse4(torch.cat([self.up4(b),  e4], dim=1)))
+        d3 = self.dec3(self.fuse3(torch.cat([self.up3(d4), e3], dim=1)))
+        d2 = self.dec2(self.fuse2(torch.cat([self.up2(d3), e2], dim=1)))
+        d1 = self.dec1(self.fuse1(torch.cat([self.up1(d2), e1], dim=1)))
 
         # Output projection + global residual (learn correction, not full image)
         out = self.output(d1) + inp

@@ -1,5 +1,5 @@
 """
-Training script for U-Net + Swin Transformer underwater image enhancement.
+Training script for NAFNet + ViT Bottleneck underwater image enhancement.
 
 Dataset structure expected:
     dataset/
@@ -11,7 +11,7 @@ Dataset structure expected:
 Split: 80% train / 10% val / 10% test
 Early stopping: halts training if val PSNR does not improve for PATIENCE epochs.
 Outputs:
-    weights/unet_final.pth       ← best checkpoint (loaded by main.py + test.py)
+    weights/nafnet_final.pth     ← best checkpoint (loaded by main.py + test.py)
     weights/test_split.npy       ← held-out test paths (used by test.py)
     weights/training_log.csv     ← per-epoch metrics
     weights/training_curve.png   ← loss + PSNR elbow curve
@@ -32,7 +32,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 from torchvision import models
-from nafnet_vit import nafnet_vit_base
+from nafnet_vit import nafnet_vit_small
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -43,12 +43,13 @@ HAZY_DIR       = os.path.join(DATASET_DIR, "hazy")
 CLEAR_DIR      = os.path.join(DATASET_DIR, "clear")
 PREPROCESS_DIR = os.path.join(DATASET_DIR, "preprocessed")
 
-EPOCHS       = 100     # max epochs — early stopping will cut this short
+EPOCHS       = 200     # cosine annealing needs full schedule to converge
 BATCH_SIZE   = 8       # NAFNet is lighter per param
 LR           = 1e-3    # NAFNet trains better at higher LR
 IMG_SIZE     = 256     # NAFNet paper trains at 256
-SAVE_EVERY   = 5       # save numbered checkpoint every N epochs
-PATIENCE     = 20      # early stopping: halt after N epochs with no val PSNR improvement
+SAVE_EVERY   = 10      # save checkpoint every N epochs
+PATIENCE     = 30      # cosine LR needs more patience — improvements are gradual
+WARMUP_EPOCHS = 5      # linear LR warmup: prevents loss spike at LR=1e-3
 
 TRAIN_SPLIT  = 0.80
 VAL_SPLIT    = 0.10
@@ -280,7 +281,7 @@ def plot_curves(epochs_ran, train_losses, val_psnrs, stopped_at, save_path):
 @ epoch {stopped_at}",
                  fontsize=8, color="gray")
 
-    fig.suptitle("Training Curve - U-Net + Swin Transformer", fontsize=13, fontweight="bold")
+    fig.suptitle("Training Curve - NAFNet + ViT Bottleneck", fontsize=13, fontweight="bold")
     fig.tight_layout()
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
@@ -337,13 +338,26 @@ def train():
         UnderwaterDataset(hp_va, cp_va, IMG_SIZE, augment=False, full_image=True),
         batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
-    model     = nafnet_vit_base().to(DEVICE)
+    model     = nafnet_vit_small().to(DEVICE)
     total     = sum(p.numel() for p in model.parameters() if p.requires_grad)
     criterion = CombinedLoss(w_l1=0.5, w_ssim=0.5, w_percep=0.0).to(DEVICE)
 
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=1e-6)
+
+    # Warmup: LR ramps linearly from 0 to LR over WARMUP_EPOCHS,
+    # then CosineAnnealingLR takes over for the remaining epochs.
+    # Prevents loss spike in early epochs when LR=1e-3 is large.
+    warmup_sched  = optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor = 1e-6 / LR,   # start near 0
+        end_factor   = 1.0,
+        total_iters  = WARMUP_EPOCHS)
+    cosine_sched  = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=EPOCHS - WARMUP_EPOCHS, eta_min=1e-6)
+    scheduler     = optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers   = [warmup_sched, cosine_sched],
+        milestones   = [WARMUP_EPOCHS])
 
     print(f"Parameters : {total:,}")
     print(f"Device     : {DEVICE}")
@@ -406,7 +420,7 @@ def train():
 
         # Numbered checkpoint
         if epoch % SAVE_EVERY == 0:
-            ckpt = os.path.join(WEIGHTS_DIR, f"unet_epoch_{epoch}.pth")
+            ckpt = os.path.join(WEIGHTS_DIR, f"nafnet_epoch_{epoch}.pth")
             torch.save(model.state_dict(), ckpt)
             print(f"  checkpoint -> {ckpt}")
 
@@ -415,7 +429,7 @@ def train():
             best_psnr      = avg_psnr
             epochs_no_impv = 0
             torch.save(model.state_dict(),
-                       os.path.join(WEIGHTS_DIR, "unet_final.pth"))
+                       os.path.join(WEIGHTS_DIR, "nafnet_final.pth"))
         else:
             epochs_no_impv += 1
             print(f"  no improvement ({epochs_no_impv}/{PATIENCE})  [avg_psnr={avg_psnr:.2f}]")
@@ -423,7 +437,7 @@ def train():
                 stopped_at = epoch
                 print(f"\
 Early stopping triggered at epoch {epoch}.")
-                print(f"Best val PSNR was {best_psnr:.2f} dB -- saved as unet_final.pth")
+                print(f"Best val PSNR was {best_psnr:.2f} dB -- saved as nafnet_final.pth")
                 break
 
     csv_file.close()
@@ -434,7 +448,7 @@ Early stopping triggered at epoch {epoch}.")
 
     print(f"Training complete.")
     print(f"Best val PSNR  : {best_psnr:.2f} dB")
-    print(f"Weights        : {WEIGHTS_DIR}/unet_final.pth")
+    print(f"Weights        : {WEIGHTS_DIR}/nafnet_final.pth")
     print(f"Training log   : {WEIGHTS_DIR}/training_log.csv")
     print(f"Training curve : {WEIGHTS_DIR}/training_curve.png")
     print(f"Run next       : python test.py")
