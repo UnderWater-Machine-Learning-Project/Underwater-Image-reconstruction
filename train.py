@@ -400,7 +400,8 @@ def train():
     train_dl = DataLoader(
         UnderwaterDataset(hp_tr, cp_tr, IMG_SIZE, augment=True,
                           preproc_paths=pp_tr, preproc_prob=PREPROC_PROB),
-        batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
+        batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=True,
+        persistent_workers=True)
     val_dl = DataLoader(
         # Val: use preprocessed only (=inference distribution) for stable PSNR
         UnderwaterDataset(hp_va, cp_va, IMG_SIZE, augment=False, full_image=True,
