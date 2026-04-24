@@ -124,29 +124,31 @@ def _laplacian_var(img_bgr: np.ndarray) -> float:
 def _is_valid_pair(hazy_path: str, clear_path: str):
     """
     Validate a single hazy/clear pair.
-    Returns (is_valid, reason_if_rejected_or_clear_img).
+    Returns (is_valid, reason_if_rejected_or_clear_img, was_resized).
     """
     h = cv2.imread(hazy_path)
     c = cv2.imread(clear_path)
 
-    if h is None: return False, "hazy unreadable"
-    if c is None: return False, "clear unreadable"
+    if h is None: return False, "hazy unreadable", False
+    if c is None: return False, "clear unreadable", False
 
+    was_resized = False
     # Size must match (paired datasets should match; sanity check)
     if h.shape[:2] != c.shape[:2]:
         # Resize clear image to match hazy
-        c = cv2.resize(c, (h.shape[1], h.shape[0]))
+        c = cv2.resize(c, (h.shape[1], h.shape[0]), interpolation=cv2.INTER_AREA)
+        was_resized = True
 
     # Clear reference quality checks
-    if c.mean() < MIN_MEAN:   return False, f"near-black clear (mean={c.mean():.1f})"
-    if c.mean() > MAX_MEAN:   return False, f"overexposed clear (mean={c.mean():.1f})"
+    if c.mean() < MIN_MEAN:   return False, f"near-black clear (mean={c.mean():.1f})", False
+    if c.mean() > MAX_MEAN:   return False, f"overexposed clear (mean={c.mean():.1f})", False
     if _laplacian_var(c) < MIN_LAPLACIAN:
-        return False, f"blurry clear (lap_var={_laplacian_var(c):.1f})"
+        return False, f"blurry clear (lap_var={_laplacian_var(c):.1f})", False
 
     # Hazy input checks
-    if h.mean() < MIN_MEAN:   return False, f"near-black hazy (mean={h.mean():.1f})"
+    if h.mean() < MIN_MEAN:   return False, f"near-black hazy (mean={h.mean():.1f})", False
 
-    return True, c
+    return True, (c if was_resized else clear_path), was_resized
 
 
 def _stable_hash(path: str) -> str:
@@ -263,15 +265,21 @@ def validate_pairs(pairs: list[tuple[str, str]],
     """
     valid   = []
     rejected = []
+    resized_count = 0
 
     for hp, cp in _iter(pairs, desc=f"Validating {dataset_name}", unit="pair"):
-        ok, reason_or_img = _is_valid_pair(hp, cp)
+        ok, reason_or_img, was_resized = _is_valid_pair(hp, cp)
         if ok:
             valid.append((hp, reason_or_img))
+            if was_resized:
+                resized_count += 1
         else:
             rejected.append((hp, cp, reason_or_img))
 
     print(f"  {dataset_name}: {len(valid)} valid / {len(rejected)} rejected")
+    if resized_count > 0:
+        print(f"  {dataset_name}: {resized_count} pairs resized to match dimensions")
+
     if rejected:
         by_reason = {}
         for _, _, r in rejected:
@@ -308,20 +316,25 @@ def merge_into_dataset(all_pairs,
 
     for i, (hp, cp) in enumerate(_iter(all_pairs, desc="Copying pairs", unit="pair")):
         tag  = f"{i:06d}"
-        ext  = Path(hp).suffix.lower()
+        ext  = ".jpg"
         h_dst = os.path.join(HAZY_DIR,  f"{tag}{ext}")
         c_dst = os.path.join(CLEAR_DIR, f"{tag}{ext}")
         try:
-            shutil.copy2(hp, h_dst)
+            h_img = cv2.imread(hp)
             if isinstance(cp, str):
-                shutil.copy2(cp, c_dst)
+                c_img = cv2.imread(cp)
             else:
-                cv2.imwrite(c_dst, cp)
+                c_img = cp
+
+            assert h_img.shape[:2] == c_img.shape[:2], f"Shape mismatch: {h_img.shape[:2]} vs {c_img.shape[:2]}"
+
+            cv2.imwrite(h_dst, h_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            cv2.imwrite(c_dst, c_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
             written += 1
         except Exception as e:
             failed += 1
             if failed <= 5:
-                print(f"  [warn] copy failed: {Path(hp).name}: {e}")
+                print(f"  [warn] process failed: {Path(hp).name}: {e}")
 
     print(f"\nMerge complete: {written} pairs written, {failed} failed")
     return written
