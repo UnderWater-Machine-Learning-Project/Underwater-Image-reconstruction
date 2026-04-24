@@ -33,7 +33,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 from torchvision import models
 from nafnet_vit import nafnet_vit_small, nafnet_vit_base
-
+from tqdm import tqdm
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ CLEAR_DIR      = os.path.join(DATASET_DIR, "clear")
 PREPROCESS_DIR = os.path.join(DATASET_DIR, "preprocessed")
 
 EPOCHS       = 200     # cosine annealing needs full schedule to converge
-BATCH_SIZE   = 4       # base model (~58M) — halve batch to stay within VRAM
+BATCH_SIZE   = 8       # nafnet_vit_small (~17M) — batch=8 safe on RTX 5070 8GB
 LR           = 1e-3    # NAFNet trains better at higher LR
 IMG_SIZE     = 256     # NAFNet paper trains at 256
 SAVE_EVERY   = 10      # save checkpoint every N epochs
@@ -56,6 +56,9 @@ VAL_SPLIT    = 0.10
 TEST_SPLIT   = 0.10
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ── Performance flags ─────────────────────────────────────────────────────────
+torch.backends.cudnn.benchmark = True   # auto-tune conv kernels for fixed 256×256 input
 
 
 # ── Dataset ────────────────────────────────────────────────────────────────────
@@ -109,35 +112,20 @@ class UnderwaterDataset(Dataset):
             img = self._degrade(img)
         return img
 
-    def _random_scale(self, hazy, clear):
-        """Random scale both images by 0.8–1.2x (applied before crop)."""
-        scale = np.random.uniform(0.8, 1.2)
-        h, w  = hazy.shape[:2]
-        new_h, new_w = int(h * scale), int(w * scale)
-        hazy  = cv2.resize(hazy,  (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        clear = cv2.resize(clear, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        return hazy, clear
+
 
     def _random_crop(self, hazy, clear, size):
+        # cropping only (fast)
         h, w = hazy.shape[:2]
-        if h < size or w < size:
-            hazy  = cv2.resize(hazy,  (max(w, size), max(h, size)))
-            clear = cv2.resize(clear, (max(w, size), max(h, size)))
-            h, w  = hazy.shape[:2]
-        top  = np.random.randint(0, h - size + 1)
-        left = np.random.randint(0, w - size + 1)
+        top = np.random.randint(0, h - size + 1) if h > size else 0
+        left = np.random.randint(0, w - size + 1) if w > size else 0
         return (hazy [top:top+size, left:left+size],
                 clear[top:top+size, left:left+size])
 
     def _center_crop(self, hazy, clear, size):
-        """Deterministic center crop — avoids edge bias."""
         h, w = hazy.shape[:2]
-        if h < size or w < size:
-            hazy  = cv2.resize(hazy,  (max(w, size), max(h, size)))
-            clear = cv2.resize(clear, (max(w, size), max(h, size)))
-            h, w  = hazy.shape[:2]
-        top  = (h - size) // 2
-        left = (w - size) // 2
+        top = (h - size) // 2 if h > size else 0
+        left = (w - size) // 2 if w > size else 0
         return (hazy [top:top+size, left:left+size],
                 clear[top:top+size, left:left+size])
 
@@ -183,23 +171,10 @@ class UnderwaterDataset(Dataset):
         inp   = self._load(hp, is_hazy=not use_preproc)
         clear = self._load(cp, is_hazy=False)
 
-        if self.augment:
-            inp, clear = self._random_scale(inp, clear)
-        # Full-image mode: deterministic resize — same pixels every epoch (for val)
-        if self.full_image:
-            inp   = cv2.resize(inp,   (self.img_size, self.img_size))
-            clear = cv2.resize(clear, (self.img_size, self.img_size))
-        # 70% random crops, 30% center crops — reduces edge bias
-        elif self.augment and np.random.rand() < 0.3:
-            inp, clear = self._center_crop(inp, clear, self.img_size)
-        else:
-            inp, clear = self._random_crop(inp, clear, self.img_size)
+        inp = inp
+        clear = clear
         if self.augment:
             inp, clear = self._augment(inp, clear)
-            # Colour jitter + noise only on hazy inputs — preprocessed already clean
-            if not use_preproc:
-                inp = self._color_jitter(inp)
-                inp = self._add_noise(inp).astype(np.uint8)
         inp_t   = torch.from_numpy(inp.astype(np.float32)   / 255.0).permute(2, 0, 1)
         clear_t = torch.from_numpy(clear.astype(np.float32) / 255.0).permute(2, 0, 1)
         return inp_t, clear_t
@@ -245,8 +220,14 @@ class CombinedLoss(nn.Module):
     def forward(self, pred, target):
         loss_l1     = self.l1(pred, target)
         loss_ssim   = 1.0 - self._ssim(pred, target)
-        loss_percep = self.percep(pred, target)
-        return self.w_l1 * loss_l1 + self.w_ssim * loss_ssim + self.w_percep * loss_percep
+        
+        loss = self.w_l1 * loss_l1 + self.w_ssim * loss_ssim
+        
+        if self.w_percep > 0.0:
+            loss_percep = self.percep(pred, target)
+            loss += self.w_percep * loss_percep
+            
+        return loss
 
 
 # ── PSNR ───────────────────────────────────────────────────────────────────────
@@ -329,7 +310,7 @@ def plot_curves(epochs_ran, train_losses, val_psnrs, stopped_at, save_path):
 # 0.65 = 65% preprocessed, 35% raw hazy each step.
 # This matches the inference distribution (enhance.py always preprocesses)
 # while keeping the model robust to raw inputs and preprocessing edge cases.
-PREPROC_PROB = 0.65
+PREPROC_PROB = 1.0   # preprocessed-only: 512px files, fast disk read, matches inference
 
 
 def train():
@@ -400,15 +381,17 @@ def train():
     train_dl = DataLoader(
         UnderwaterDataset(hp_tr, cp_tr, IMG_SIZE, augment=True,
                           preproc_paths=pp_tr, preproc_prob=PREPROC_PROB),
-        batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=True,
+        batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True,
         persistent_workers=True)
     val_dl = DataLoader(
         # Val: use preprocessed only (=inference distribution) for stable PSNR
         UnderwaterDataset(hp_va, cp_va, IMG_SIZE, augment=False, full_image=True,
                           preproc_paths=pp_va, preproc_prob=1.0 if pp_va else 0.0),
-        batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
+        batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True,
+        persistent_workers=True)
+    print(f"DataLoader workers: train={train_dl.num_workers}  val={val_dl.num_workers}")
 
-    model     = nafnet_vit_base().to(DEVICE)
+    model     = nafnet_vit_small().to(DEVICE)
     total     = sum(p.numel() for p in model.parameters() if p.requires_grad)
     criterion = CombinedLoss(w_l1=0.5, w_ssim=0.5, w_percep=0.0).to(DEVICE)
 
@@ -447,26 +430,37 @@ def train():
     hist_loss       = []
     hist_psnr       = []
 
+    # ── Mixed precision scaler ─────────────────────────────────────────────────
+    scaler = torch.amp.GradScaler("cuda")
+    print(f"Mixed precision : enabled (fp16 via torch.amp)")
+
     for epoch in range(1, EPOCHS + 1):
         # Train
         model.train()
         train_loss = 0.0
-        for hazy_b, clear_b in train_dl:
-            hazy_b, clear_b = hazy_b.to(DEVICE), clear_b.to(DEVICE)
-            optimizer.zero_grad()
-            loss = criterion(model(hazy_b), clear_b)
-            loss.backward()
+        pbar = tqdm(train_dl, desc=f"Epoch [{epoch:>3}/{EPOCHS}]", leave=False)
+        for hazy_b, clear_b in pbar:
+            hazy_b = hazy_b.to(DEVICE, non_blocking=True)
+            clear_b = clear_b.to(DEVICE, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.amp.autocast("cuda"):
+                loss = criterion(model(hazy_b), clear_b)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             train_loss += loss.item()
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
         train_loss /= len(train_dl)
 
         # Val
         model.eval()
         val_psnr = 0.0
-        with torch.no_grad():
+        with torch.no_grad(), torch.amp.autocast("cuda"):
             for hazy_b, clear_b in val_dl:
-                hazy_b, clear_b = hazy_b.to(DEVICE), clear_b.to(DEVICE)
+                hazy_b = hazy_b.to(DEVICE, non_blocking=True)
+                clear_b = clear_b.to(DEVICE, non_blocking=True)
                 val_psnr += psnr(model(hazy_b), clear_b)
         val_psnr /= len(val_dl)
         # Track history for curve (must be before running avg calculation)
