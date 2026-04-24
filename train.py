@@ -48,7 +48,7 @@ BATCH_SIZE   = 8       # nafnet_vit_small (~17M) — batch=8 safe on RTX 5070 8G
 LR           = 1e-3    # NAFNet trains better at higher LR
 IMG_SIZE     = 256     # NAFNet paper trains at 256
 SAVE_EVERY   = 10      # save checkpoint every N epochs
-PATIENCE     = 30      # cosine LR needs more patience — improvements are gradual
+PATIENCE     = 50    # effectively disabled — let cosine LR run the full schedule
 WARMUP_EPOCHS = 5      # linear LR warmup: prevents loss spike at LR=1e-3
 
 TRAIN_SPLIT  = 0.80
@@ -171,8 +171,9 @@ class UnderwaterDataset(Dataset):
         inp   = self._load(hp, is_hazy=not use_preproc)
         clear = self._load(cp, is_hazy=False)
 
-        inp = inp
-        clear = clear
+        # Single fast resize to uniform size (images are ~288-512px, not uniform)
+        inp   = cv2.resize(inp,   (self.img_size, self.img_size))
+        clear = cv2.resize(clear, (self.img_size, self.img_size))
         if self.augment:
             inp, clear = self._augment(inp, clear)
         inp_t   = torch.from_numpy(inp.astype(np.float32)   / 255.0).permute(2, 0, 1)
@@ -205,7 +206,10 @@ class CombinedLoss(nn.Module):
         self.l1       = nn.L1Loss()
         self.percep   = VGGPerceptualLoss()
 
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
     def _ssim(self, x, y, window_size=11):
+        # Force fp32: fp16 underflows the 1e-8 epsilon to zero → NaN
+        x, y   = x.float(), y.float()
         C1, C2 = 0.01**2, 0.03**2
         mu_x   = nn.functional.avg_pool2d(x, window_size, 1, window_size//2)
         mu_y   = nn.functional.avg_pool2d(y, window_size, 1, window_size//2)
@@ -430,9 +434,11 @@ def train():
     hist_loss       = []
     hist_psnr       = []
 
-    # ── Mixed precision scaler ─────────────────────────────────────────────────
-    scaler = torch.amp.GradScaler("cuda")
-    print(f"Mixed precision : enabled (fp16 via torch.amp)")
+    # ── Mixed precision (bf16) ─────────────────────────────────────────────────
+    # bf16 has same exponent range as fp32 — no overflow, no GradScaler needed.
+    # RTX 5070 (Blackwell) has native bf16 tensor core support.
+    amp_dtype = torch.bfloat16
+    print(f"Mixed precision : enabled (bf16 — no overflow, no scaler needed)")
 
     for epoch in range(1, EPOCHS + 1):
         # Train
@@ -443,13 +449,11 @@ def train():
             hazy_b = hazy_b.to(DEVICE, non_blocking=True)
             clear_b = clear_b.to(DEVICE, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda"):
+            with torch.amp.autocast("cuda", dtype=amp_dtype):
                 loss = criterion(model(hazy_b), clear_b)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
             train_loss += loss.item()
             pbar.set_postfix(loss=f"{loss.item():.4f}")
         train_loss /= len(train_dl)
@@ -457,7 +461,7 @@ def train():
         # Val
         model.eval()
         val_psnr = 0.0
-        with torch.no_grad(), torch.amp.autocast("cuda"):
+        with torch.no_grad(), torch.amp.autocast("cuda", dtype=amp_dtype):
             for hazy_b, clear_b in val_dl:
                 hazy_b = hazy_b.to(DEVICE, non_blocking=True)
                 clear_b = clear_b.to(DEVICE, non_blocking=True)
