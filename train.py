@@ -32,7 +32,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 from torchvision import models
-from nafnet_vit import nafnet_vit_small
+from nafnet_vit import nafnet_vit_small, nafnet_vit_base
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -44,7 +44,7 @@ CLEAR_DIR      = os.path.join(DATASET_DIR, "clear")
 PREPROCESS_DIR = os.path.join(DATASET_DIR, "preprocessed")
 
 EPOCHS       = 200     # cosine annealing needs full schedule to converge
-BATCH_SIZE   = 8       # NAFNet is lighter per param
+BATCH_SIZE   = 4       # base model (~58M) — halve batch to stay within VRAM
 LR           = 1e-3    # NAFNet trains better at higher LR
 IMG_SIZE     = 256     # NAFNet paper trains at 256
 SAVE_EVERY   = 10      # save checkpoint every N epochs
@@ -63,14 +63,32 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class UnderwaterDataset(Dataset):
     SYNTHETIC = False   # set True if you only have clear images, no hazy pairs
 
-    def __init__(self, hazy_paths, clear_paths, img_size=256, augment=True, full_image=False):
-        self.pairs      = list(zip(hazy_paths, clear_paths))
-        self.img_size   = img_size
-        self.augment    = augment
-        self.full_image = full_image   # resize to img_size instead of cropping (for stable val)
+    def __init__(self, hazy_paths, clear_paths, img_size=256, augment=True, full_image=False,
+                 preproc_paths=None, preproc_prob=0.5):
+        """
+        Mixed-input dataset: each sample randomly draws from hazy OR preprocessed.
+
+        preproc_paths : parallel list of preprocessed paths (1:1 with clear_paths).
+                        If None, only hazy inputs are used (original behaviour).
+        preproc_prob  : probability of choosing preprocessed over hazy each step.
+                        0.0 = hazy only,  1.0 = preprocessed only.
+
+        Why mixed? enhance.py always preprocesses at inference, so production inputs
+        are mostly preprocessed. But edge-case preprocessing failures produce inputs
+        closer to raw hazy. Mixed training makes one model robust to both without
+        needing two separate models.
+
+        Val always uses preprocessed (stable, interpretable PSNR).
+        """
+        self.hazy_pairs    = list(zip(hazy_paths, clear_paths))
+        self.preproc_pairs = list(zip(preproc_paths, clear_paths)) if preproc_paths else None
+        self.preproc_prob  = preproc_prob if preproc_paths else 0.0
+        self.img_size      = img_size
+        self.augment       = augment
+        self.full_image    = full_image
 
     def __len__(self):
-        return len(self.pairs)
+        return len(self.hazy_pairs)
 
     def _degrade(self, img):
         """Simulate underwater physics: wavelength-dependent attenuation + haze."""
@@ -150,27 +168,41 @@ class UnderwaterDataset(Dataset):
         return hazy, clear
 
     def __getitem__(self, idx):
-        hp, cp  = self.pairs[idx]
-        hazy    = self._load(hp, is_hazy=True)
-        clear   = self._load(cp, is_hazy=False)
+        # Mixed-input selection: coin flip each sample
+        # If preproc_pairs available and rand < preproc_prob -> use preprocessed
+        # otherwise -> use raw hazy (with jitter + noise augmentation)
+        use_preproc = (
+            self.preproc_pairs is not None
+            and np.random.rand() < self.preproc_prob
+        )
+        if use_preproc:
+            hp, cp = self.preproc_pairs[idx]
+        else:
+            hp, cp = self.hazy_pairs[idx]
+
+        inp   = self._load(hp, is_hazy=not use_preproc)
+        clear = self._load(cp, is_hazy=False)
+
         if self.augment:
-            hazy, clear = self._random_scale(hazy, clear)
+            inp, clear = self._random_scale(inp, clear)
         # Full-image mode: deterministic resize — same pixels every epoch (for val)
         if self.full_image:
-            hazy  = cv2.resize(hazy,  (self.img_size, self.img_size))
+            inp   = cv2.resize(inp,   (self.img_size, self.img_size))
             clear = cv2.resize(clear, (self.img_size, self.img_size))
         # 70% random crops, 30% center crops — reduces edge bias
         elif self.augment and np.random.rand() < 0.3:
-            hazy, clear = self._center_crop(hazy, clear, self.img_size)
+            inp, clear = self._center_crop(inp, clear, self.img_size)
         else:
-            hazy, clear = self._random_crop(hazy, clear, self.img_size)
+            inp, clear = self._random_crop(inp, clear, self.img_size)
         if self.augment:
-            hazy, clear = self._augment(hazy, clear)
-            hazy = self._color_jitter(hazy)
-            hazy = self._add_noise(hazy).astype(np.uint8)
-        hazy_t  = torch.from_numpy(hazy.astype(np.float32)  / 255.0).permute(2, 0, 1)
+            inp, clear = self._augment(inp, clear)
+            # Colour jitter + noise only on hazy inputs — preprocessed already clean
+            if not use_preproc:
+                inp = self._color_jitter(inp)
+                inp = self._add_noise(inp).astype(np.uint8)
+        inp_t   = torch.from_numpy(inp.astype(np.float32)   / 255.0).permute(2, 0, 1)
         clear_t = torch.from_numpy(clear.astype(np.float32) / 255.0).permute(2, 0, 1)
-        return hazy_t, clear_t
+        return inp_t, clear_t
 
 
 # ── Loss ───────────────────────────────────────────────────────────────────────
@@ -293,52 +325,89 @@ def plot_curves(epochs_ran, train_losses, val_psnrs, stopped_at, save_path):
 
 # ── Train ──────────────────────────────────────────────────────────────────────
 
+# ── Mixed training probability ────────────────────────────────────────────────
+# 0.65 = 65% preprocessed, 35% raw hazy each step.
+# This matches the inference distribution (enhance.py always preprocesses)
+# while keeping the model robust to raw inputs and preprocessing edge cases.
+PREPROC_PROB = 0.65
+
+
 def train():
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
-    # Auto-detect preprocessed dataset (preferred) or fall back to raw hazy
-    if os.path.isdir(PREPROCESS_DIR) and len(os.listdir(PREPROCESS_DIR)) > 0:
-        input_dir = PREPROCESS_DIR
-        input_src = "preprocessed (WB+UDCP+CLAHE+Sharpen)"
-    else:
-        input_dir = HAZY_DIR
-        input_src = "raw hazy (no preprocessing)"
-
-    pairs = get_pairs(input_dir, CLEAR_DIR)
-    if not pairs:
-        print(f"[error] No paired images found in {input_dir} / {CLEAR_DIR}")
+    # Always use hazy as primary pairs for indexing (defines dataset size)
+    hazy_pairs = get_pairs(HAZY_DIR, CLEAR_DIR)
+    if not hazy_pairs:
+        print(f"[error] No paired images found in {HAZY_DIR} / {CLEAR_DIR}")
         return
 
-    print(f"Input source: {input_src}")
-    print(f"Input dir   : {input_dir}")
-    print(f"Total pairs : {len(pairs)}")
-    np.random.seed(42)
-    np.random.shuffle(pairs)
+    # Load preprocessed pairs if available (same filenames, different folder)
+    has_preproc = os.path.isdir(PREPROCESS_DIR) and len(os.listdir(PREPROCESS_DIR)) > 0
+    preproc_pairs = get_pairs(PREPROCESS_DIR, CLEAR_DIR) if has_preproc else None
 
-    n_test  = max(1, int(len(pairs) * TEST_SPLIT))
-    n_val   = max(1, int(len(pairs) * VAL_SPLIT))
-    test_pairs  = pairs[:n_test]
-    val_pairs   = pairs[n_test:n_test + n_val]
-    train_pairs = pairs[n_test + n_val:]
+    if has_preproc and preproc_pairs:
+        input_src = f"MIXED  ({int(PREPROC_PROB*100)}% preprocessed + {int((1-PREPROC_PROB)*100)}% raw hazy)"
+        # Align: only keep indices present in both
+        preproc_names = {os.path.basename(p[0]): p for p in preproc_pairs}
+        aligned_hazy    = []
+        aligned_preproc = []
+        for hp, cp in hazy_pairs:
+            name = os.path.basename(hp)
+            if name in preproc_names:
+                aligned_hazy.append((hp, cp))
+                aligned_preproc.append(preproc_names[name])
+        hazy_pairs    = aligned_hazy
+        preproc_pairs = aligned_preproc
+        print(f"Aligned pairs   : {len(hazy_pairs)} (hazy + preprocessed)")
+    else:
+        input_src     = "raw hazy only (no preprocessed folder found)"
+        preproc_pairs = None
+
+    print(f"Input mode  : {input_src}")
+    print(f"Total pairs : {len(hazy_pairs)}")
+
+    np.random.seed(42)
+    idx = np.random.permutation(len(hazy_pairs)).tolist()
+    hazy_pairs    = [hazy_pairs[i]    for i in idx]
+    if preproc_pairs:
+        preproc_pairs = [preproc_pairs[i] for i in idx]
+
+    n_test  = max(1, int(len(hazy_pairs) * TEST_SPLIT))
+    n_val   = max(1, int(len(hazy_pairs) * VAL_SPLIT))
+
+    # Split hazy pairs (index-aligned)
+    test_hazy   = hazy_pairs[:n_test]
+    val_hazy    = hazy_pairs[n_test:n_test + n_val]
+    train_hazy  = hazy_pairs[n_test + n_val:]
+
+    # Split preproc pairs with same indices
+    test_preproc  = preproc_pairs[:n_test]            if preproc_pairs else None
+    val_preproc   = preproc_pairs[n_test:n_test+n_val] if preproc_pairs else None
+    train_preproc = preproc_pairs[n_test + n_val:]    if preproc_pairs else None
 
     np.save(os.path.join(WEIGHTS_DIR, "test_split.npy"),
-            np.array([p[0] for p in test_pairs]))
+            np.array([p[0] for p in test_hazy]))
 
-    print(f"Split  ->  train: {len(train_pairs)}  |  val: {len(val_pairs)}  |  test: {len(test_pairs)}")
+    print(f"Split  ->  train: {len(train_hazy)}  |  val: {len(val_hazy)}  |  test: {len(test_hazy)}")
     print(f"Early stopping patience: {PATIENCE} epochs")
     print(f"Test paths saved -> {WEIGHTS_DIR}/test_split.npy")
 
-    hp_tr, cp_tr = zip(*train_pairs)
-    hp_va, cp_va = zip(*val_pairs)
+    hp_tr, cp_tr = zip(*train_hazy)
+    hp_va, cp_va = zip(*val_hazy)
+    pp_tr = [p[0] for p in train_preproc] if train_preproc else None
+    pp_va = [p[0] for p in val_preproc]   if val_preproc   else None
 
     train_dl = DataLoader(
-        UnderwaterDataset(hp_tr, cp_tr, IMG_SIZE, augment=True),
+        UnderwaterDataset(hp_tr, cp_tr, IMG_SIZE, augment=True,
+                          preproc_paths=pp_tr, preproc_prob=PREPROC_PROB),
         batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
     val_dl = DataLoader(
-        UnderwaterDataset(hp_va, cp_va, IMG_SIZE, augment=False, full_image=True),
+        # Val: use preprocessed only (=inference distribution) for stable PSNR
+        UnderwaterDataset(hp_va, cp_va, IMG_SIZE, augment=False, full_image=True,
+                          preproc_paths=pp_va, preproc_prob=1.0 if pp_va else 0.0),
         batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
-    model     = nafnet_vit_small().to(DEVICE)
+    model     = nafnet_vit_base().to(DEVICE)
     total     = sum(p.numel() for p in model.parameters() if p.requires_grad)
     criterion = CombinedLoss(w_l1=0.5, w_ssim=0.5, w_percep=0.0).to(DEVICE)
 
