@@ -1,0 +1,220 @@
+// ─────────────────────────────────────────────
+// fish.scss — Scroll-triggered deep-sea fish
+// ─────────────────────────────────────────────
+ 
+// Colour tokens
+$fish-body:     rgba(108, 198, 188, 0.30);
+$fish-head:     rgba(92, 173, 176, 0.48);
+$fish-fin:      rgba(90, 164, 156, 0.28);
+$fish-tail:     rgba(120, 205, 193, 0.34);
+$fish-skeleton: rgba(213, 187, 139, 0.15);
+$fish-glow:     rgba(124, 214, 204, 0.18);
+$light-core:    rgba(124, 214, 204, 0.18);
+ 
+// ── Wrapper ──────────────────────────────────
+.fish-wrapper {
+  position: absolute;
+  inset: 0;
+  perspective: 800px;
+  overflow: visible;
+}
+ 
+// ── Fish root ────────────────────────────────
+.fish {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: clamp(220px, 22vw, 340px);
+  height: clamp(96px, 10vw, 146px);
+  transform-style: preserve-3d;
+  will-change: transform;
+  opacity: 0.92;
+  mix-blend-mode: screen;
+  filter:
+    drop-shadow(0 0 22px rgba(124, 214, 204, 0.3))
+    drop-shadow(0 0 60px rgba(124, 214, 204, 0.14))
+    drop-shadow(0 0 28px rgba(213, 187, 139, 0.08));
+}
+ 
+// ── Inner (fades on deep dive) ───────────────
+.fish__inner {
+  position: absolute;
+  inset: 0;
+}
+ 
+// ── Body segments ────────────────────────────
+.fish__body {
+  position: absolute;
+  border-radius: 50%;
+  background: $fish-body;
+  backdrop-filter: blur(4px);
+ 
+  &:nth-child(1) {
+    width: 80px;
+    height: 36px;
+    top: 7px;
+    left: 20px;
+    background: linear-gradient(135deg, rgba(132, 221, 212, 0.46), rgba(11, 34, 44, 0.72));
+  }
+  &:nth-child(2) {
+    width: 60px;
+    height: 28px;
+    top: 11px;
+    left: 28px;
+    background: rgba(213, 187, 139, 0.12);
+  }
+  &:nth-child(3) {
+    width: 40px;
+    height: 20px;
+    top: 15px;
+    left: 36px;
+    background: rgba(124, 214, 204, 0.2);
+  }
+  &:nth-child(4) {
+    // lateral line
+    width: 70px;
+    height: 2px;
+    top: 24px;
+    left: 22px;
+    background: linear-gradient(90deg, transparent, rgba(213,187,139,0.4), transparent);
+    border-radius: 1px;
+  }
+}
+ 
+// ── Head ─────────────────────────────────────
+.fish__head {
+  position: absolute;
+  border-radius: 50%;
+  background: $fish-head;
+ 
+  // Main dome
+  &:not([class*="--"]) {
+    width: 42px;
+    height: 38px;
+    top: 6px;
+    left: 4px;
+    background: linear-gradient(135deg, rgba(140, 228, 214, 0.38), rgba(7, 24, 36, 0.84));
+  }
+  // Eye socket
+  &--2 {
+    width: 10px;
+    height: 10px;
+    top: 12px;
+    left: 16px;
+    background: rgba(213, 187, 139, 0.76);
+    box-shadow: 0 0 10px rgba(213, 187, 139, 0.66);
+  }
+  // Iris
+  &--3 {
+    width: 5px;
+    height: 5px;
+    top: 14px;
+    left: 18px;
+    background: #fff;
+    border-radius: 50%;
+  }
+  // Mouth slit
+  &--4 {
+    width: 10px;
+    height: 3px;
+    top: 28px;
+    left: 6px;
+    background: rgba(124, 214, 204, 0.34);
+    border-radius: 2px;
+  }
+}
+ 
+// ── Tail ─────────────────────────────────────
+.fish__tail-main {
+  position: absolute;
+  right: 0;
+  top: 8px;
+  width: 26px;
+  height: 34px;
+  background: $fish-tail;
+  clip-path: polygon(0 50%, 100% 0, 100% 100%);
+}
+ 
+.fish__tail-fork {
+  position: absolute;
+  right: -6px;
+  top: 12px;
+  width: 14px;
+  height: 26px;
+  background: rgba(124, 214, 204, 0.18);
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+ 
+// ── Fins ─────────────────────────────────────
+.fish__fin {
+  position: absolute;
+  background: $fish-fin;
+  clip-path: polygon(0 100%, 50% 0, 100% 100%);
+ 
+  &:not([class*="--"]) {
+    // dorsal fin
+    width: 30px;
+    height: 18px;
+    top: -12px;
+    left: 44px;
+    background: rgba(124, 214, 204, 0.28);
+  }
+  &--2 {
+    // pectoral fin
+    width: 20px;
+    height: 14px;
+    bottom: -6px;
+    left: 52px;
+    background: rgba(213, 187, 139, 0.2);
+  }
+}
+ 
+// ── Skeleton (x-ray layer) ────────────────────
+.fish__skeleton {
+  position: absolute;
+  inset: 6px 8px;
+  opacity: 0;
+  background-image:
+    // spine
+    linear-gradient(90deg, rgba(80,180,255,0.5) 1px, transparent 1px),
+    // ribs
+    repeating-linear-gradient(
+      90deg,
+      transparent,
+      transparent 8px,
+      rgba(80,180,255,0.2) 8px,
+      rgba(80,180,255,0.2) 9px
+    );
+  background-size: 100% 1px, 100% 100%;
+  background-position: center center, 0 0;
+  border-radius: 40% 40% 30% 30%;
+  box-shadow: 0 0 24px rgba(213, 187, 139, 0.08);
+}
+ 
+// ── Ambient lights ────────────────────────────
+.lights {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+ 
+.lights__group {
+  position: absolute;
+  inset: 0;
+}
+ 
+.lights__light {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(circle, $light-core 0%, transparent 70%);
+  will-change: transform;
+  filter: blur(2px);
+ 
+  &:nth-child(1) { width: 300px; height: 300px; top: 10%; left: 20%; opacity: 0.5; }
+  &:nth-child(2) { width: 200px; height: 200px; top: 60%; left: 70%; opacity: 0.35; }
+  &:nth-child(3) { width: 250px; height: 250px; top: 80%; left: 10%; opacity: 0.4; }
+  &:nth-child(4) { width: 180px; height: 180px; top: 30%; left: 85%; opacity: 0.3; }
+  &:nth-child(5) { width: 220px; height: 220px; top: 50%; left: 40%; opacity: 0.25; }
+}
+ 
