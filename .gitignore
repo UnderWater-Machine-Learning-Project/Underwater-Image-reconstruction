@@ -24,6 +24,7 @@ runs/
 Ultralytics/
 *.jpg
 *.png
+!assets/*.png
 
 # ===============================
 # OS Junk
