@@ -139,15 +139,17 @@ The 19.8M parameter NAFNet was trained on a dataset of 13,815 paired images in t
 - **Result:** Excellent structural recovery, but occasional warm-color bleeding.
 
 ### Phase 2: Perceptual Fine-Tuning
-To combat color bleeding, we unfroze the model and added explicit color and edge constraints.
-- **Loss:** $0.45 \times L_1 + 0.35 \times SSIM + 0.10 \times L_{edge} + 0.10 \times L_{color}$
-- $L_{color}$ computes the Mean Absolute Error of the channel means and standard deviations, forcing the network to exactly match the global color distribution of the target.
-- **Input Distribution:** We mixed 19% raw hazy images into the preprocessed training batches to force the model to handle edge-cases where the classical preprocessor fails.
+In the first phase, the model learned how to reconstruct shapes perfectly, but it sometimes got confused by the complex underwater colors (causing 'color bleeding'). To fix this, we ran a second 'fine-tuning' phase. 
+
+We added two new constraints (Loss Functions) to the model:
+1. **Edge Loss:** Forces the model to pay extra attention to sharp outlines (crucial for fish scales and coral textures).
+2. **Color Loss:** Mathematically forces the overall color balance of the output to match the ground-truth clear image. 
 
 <img src="./assets/training_curves.png" width="100%" alt="Training Curves">
 
-> [!TIP]
-> The early stopping trigger at epoch 31 in Phase 2 confirms the model reached the maximum representational capacity of the dataset, achieving a peak validation PSNR of 22.62 dB.
+#### How to read this chart (For the Jury):
+- **The Red Line (Training Loss):** This shows the model's error rate decreasing. You can see a distinct jump where Phase 2 starts; this is because we made the test harder by adding the Color and Edge constraints. However, it quickly learns and drives the error back down.
+- **The Blue Dashed Line (Validation PSNR):** This measures the quality of the images the model produces on data it has *never seen before*. Higher is better. You can see it steadily climb and peak at **22.62 dB**, proving the model successfully learned to generalize without memorizing the answers.
 
 ---
 
@@ -228,7 +230,25 @@ With the v2.0 architecture locked and deployed, future research tracks include:
 
 ---
 
-## 12. Appendix & Reproducibility Notes
+---
+
+## 12. Project Defense / Jury Q&A
+
+To preempt common academic and technical questions regarding the pipeline design:
+
+**Q: Why use Classical Preprocessing at all? Why not just feed raw images into the Deep Learning model?**  
+**A:** Deep learning models are "lazy." If you feed them raw underwater images, they have to spend millions of parameters just learning basic physics (like how light scatters in water). By running a classical, math-based preprocessor first (UDCP + White Balance), we solve the basic physics for the AI. This allows the AI (NAFNet) to use 100% of its brainpower focusing on the hard stuff: recovering fine textures and complex color casts. This is why our model beats others while being 60% smaller.
+
+**Q: What is the "Colorfulness Fusion Guard" and why is it your most important contribution?**  
+**A:** A major flaw in almost all AI restoration papers is that the AI will ruin a perfectly good image. If a diver takes a beautiful, clear photo in 2 feet of water, the AI will try to "dehaze" it anyway, resulting in unnatural colors. Our pipeline calculates a mathematical "Colorfulness Score" for both the input and the AI's output. If the AI's output is *less* colorful than the input, the pipeline overrides the AI and uses the safe, classical image. This guarantees a "do-no-harm" system.
+
+**Q: Why did you switch from Swin Transformer to ViT (Vision Transformer)?**  
+**A:** Swin Transformers look at the image in small, isolated windows (e.g., 8x8 squares). Underwater color casts are a *global* problem—the blue hue affects the entire ocean, not just one square. ViT looks at the *entire* image at once (Global Attention). By placing a ViT at the deepest bottleneck of the network, the model can instantly understand the global lighting conditions of the scene.
+
+**Q: Why does the model fail in extreme deep water (>30 meters)?**  
+**A:** This is a physics ceiling, not an AI flaw. Below 30 meters, red wavelengths are entirely absorbed by the water—zero red photons reach the camera. An AI cannot enhance data that doesn't exist. It can only guess (hallucinate). True color restoration at extreme depths physically requires artificial strobe lighting.
+
+## 13. Appendix & Reproducibility Notes
 
 - **Hardware Used:** NVIDIA RTX 5070 8GB (Blackwell). Training utilized native `bfloat16` mixed precision.
 - **Dataset:** 13,815 paired images, heavily cleaned (blurry references and misaligned pairs strictly removed via automated Laplacian variance checks).
