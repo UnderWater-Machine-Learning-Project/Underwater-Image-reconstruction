@@ -198,13 +198,16 @@ class VGGPerceptualLoss(nn.Module):
 
 
 class CombinedLoss(nn.Module):
-    def __init__(self, w_l1=0.5, w_ssim=0.3, w_percep=0.2):
+    def __init__(self, w_l1=0.5, w_ssim=0.3, w_percep=0.2,
+                 w_grad=0.0, w_color=0.0):
         super().__init__()
         self.w_l1     = w_l1
         self.w_ssim   = w_ssim
         self.w_percep = w_percep
+        self.w_grad   = w_grad
+        self.w_color  = w_color
         self.l1       = nn.L1Loss()
-        self.percep   = VGGPerceptualLoss()
+        self.percep   = VGGPerceptualLoss() if w_percep > 0.0 else None
 
     @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
     def _ssim(self, x, y, window_size=11):
@@ -221,13 +224,33 @@ class CombinedLoss(nn.Module):
         den = (mu_x2 + mu_y2 + C1) * (sx2 + sy2 + C2)
         return (num / (den + 1e-8)).mean()
 
+    def _gradient_loss(self, pred, target):
+        pred_dx = pred[:, :, :, 1:] - pred[:, :, :, :-1]
+        pred_dy = pred[:, :, 1:, :] - pred[:, :, :-1, :]
+        tgt_dx  = target[:, :, :, 1:] - target[:, :, :, :-1]
+        tgt_dy  = target[:, :, 1:, :] - target[:, :, :-1, :]
+        return self.l1(pred_dx, tgt_dx) + self.l1(pred_dy, tgt_dy)
+
+    def _color_loss(self, pred, target):
+        pred_mean = pred.mean(dim=(2, 3))
+        tgt_mean  = target.mean(dim=(2, 3))
+        pred_std  = pred.std(dim=(2, 3), unbiased=False)
+        tgt_std   = target.std(dim=(2, 3), unbiased=False)
+        return self.l1(pred_mean, tgt_mean) + self.l1(pred_std, tgt_std)
+
     def forward(self, pred, target):
         loss_l1     = self.l1(pred, target)
         loss_ssim   = 1.0 - self._ssim(pred, target)
         
         loss = self.w_l1 * loss_l1 + self.w_ssim * loss_ssim
+
+        if self.w_grad > 0.0:
+            loss += self.w_grad * self._gradient_loss(pred, target)
+
+        if self.w_color > 0.0:
+            loss += self.w_color * self._color_loss(pred, target)
         
-        if self.w_percep > 0.0:
+        if self.percep is not None:
             loss_percep = self.percep(pred, target)
             loss += self.w_percep * loss_percep
             
