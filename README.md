@@ -91,6 +91,10 @@ The pipeline evolved through four distinct architectural paradigms. This section
 - **Parameters:** ~45.2M (Extremely heavy, causing OOM errors).
 
 ### 4.4 Final Model: NAFNet + ViT Bottleneck (v2.0)
+
+**Why did we switch from Swin Transformer to ViT (Vision Transformer)?**  
+Swin Transformers look at the image in small, isolated windows (e.g., 8x8 squares). Underwater color casts are a *global* problem—the blue hue affects the entire ocean, not just one square. ViT looks at the *entire* image at once (Global Attention). By placing a ViT at the deepest bottleneck of the network, the model can instantly understand the global lighting conditions of the scene.
+
 - **Architecture:** We adopted the **Simple Baseline for Image Restoration (NAFNet)**, which drops nonlinear activations (ReLU/GELU) entirely in favor of a learnable `SimpleGate` operation. We replaced the Swin bottleneck with a **Full Vision Transformer (ViT)**.
 - **Why ViT works:** By downsampling the feature map significantly in the encoder, the bottleneck reaches a spatial resolution of 16x16 (256 tokens). At this tiny resolution, we can afford **full, unmasked global attention**. Every token attends to every other token. The network instantly grasps the global scene illumination and color cast, passing this context back up through the decoder.
 - **Why NAFNet is superior:** `SimpleGate` essentially multiplies a feature map by a split version of itself. This acts as a spatial attention mechanism with zero extra parameters, allowing the network to retain high-frequency edge data while scaling down the total parameter count to ~19.8M.
@@ -109,6 +113,11 @@ The pipeline evolved through four distinct architectural paradigms. This section
 ## 5. Classical Preprocessing Analysis
 
 We do not feed raw images directly to the neural network. We feed *preprocessed* images. This forces the heavy deep-learning model to act as a residual refiner rather than learning basic physics from scratch.
+
+
+**Why use Classical Preprocessing at all? Why not just feed raw images into the Deep Learning model?**  
+Deep learning models are "lazy." If you feed them raw underwater images, they have to spend millions of parameters just learning basic physics (like how light scatters in water). By running a classical, math-based preprocessor first (UDCP + White Balance), we solve the basic physics for the AI. This allows the AI (NAFNet) to use 100% of its brainpower focusing on the hard stuff: recovering fine textures and complex color casts. This is why our model beats others while being 60% smaller.
+
 
 ### The Physics-Motivated Order
 
@@ -215,7 +224,10 @@ No model is perfect. Honest benchmarking requires acknowledging physics ceilings
 
 > [!WARNING]
 > **Extreme Deep-Water Cutoff**
-> At depths > 30 meters, the red spectrum is physically absent (0 photons). The NAFNet model cannot restore what was never captured by the sensor. In these extreme monotone cases, the model outputs a gray/green image. The Fusion Guard safely reverts to the UDCP output, but true restoration is physically impossible without active strobe lighting.
+> 
+**Why does the model fail in extreme deep water (>30 meters)?**  
+This is a physics ceiling, not an AI flaw. Below 30 meters, red wavelengths are entirely absorbed by the water—zero red photons reach the camera. An AI cannot enhance data that doesn't exist. It can only guess (hallucinate). True color restoration at extreme depths physically requires artificial strobe lighting.
+
 
 **Temporal Flickering:** The current pipeline processes frames independently. If applied to video, the CLAHE block and the dynamic Colorfulness $\alpha$ weight will fluctuate slightly between frames, causing visual flickering. 
 
@@ -232,23 +244,7 @@ With the v2.0 architecture locked and deployed, future research tracks include:
 
 ---
 
-## 12. Project Defense / Jury Q&A
-
-To preempt common academic and technical questions regarding the pipeline design:
-
-**Q: Why use Classical Preprocessing at all? Why not just feed raw images into the Deep Learning model?**  
-**A:** Deep learning models are "lazy." If you feed them raw underwater images, they have to spend millions of parameters just learning basic physics (like how light scatters in water). By running a classical, math-based preprocessor first (UDCP + White Balance), we solve the basic physics for the AI. This allows the AI (NAFNet) to use 100% of its brainpower focusing on the hard stuff: recovering fine textures and complex color casts. This is why our model beats others while being 60% smaller.
-
-**Q: What is the "Colorfulness Fusion Guard" and why is it your most important contribution?**  
-**A:** A major flaw in almost all AI restoration papers is that the AI will ruin a perfectly good image. If a diver takes a beautiful, clear photo in 2 feet of water, the AI will try to "dehaze" it anyway, resulting in unnatural colors. Our pipeline calculates a mathematical "Colorfulness Score" for both the input and the AI's output. If the AI's output is *less* colorful than the input, the pipeline overrides the AI and uses the safe, classical image. This guarantees a "do-no-harm" system.
-
-**Q: Why did you switch from Swin Transformer to ViT (Vision Transformer)?**  
-**A:** Swin Transformers look at the image in small, isolated windows (e.g., 8x8 squares). Underwater color casts are a *global* problem—the blue hue affects the entire ocean, not just one square. ViT looks at the *entire* image at once (Global Attention). By placing a ViT at the deepest bottleneck of the network, the model can instantly understand the global lighting conditions of the scene.
-
-**Q: Why does the model fail in extreme deep water (>30 meters)?**  
-**A:** This is a physics ceiling, not an AI flaw. Below 30 meters, red wavelengths are entirely absorbed by the water—zero red photons reach the camera. An AI cannot enhance data that doesn't exist. It can only guess (hallucinate). True color restoration at extreme depths physically requires artificial strobe lighting.
-
-## 13. Appendix & Reproducibility Notes
+## 12. Appendix & Reproducibility Notes & Reproducibility Notes
 
 - **Hardware Used:** NVIDIA RTX 5070 8GB (Blackwell). Training utilized native `bfloat16` mixed precision.
 - **Dataset:** 13,815 paired images, heavily cleaned (blurry references and misaligned pairs strictly removed via automated Laplacian variance checks).
