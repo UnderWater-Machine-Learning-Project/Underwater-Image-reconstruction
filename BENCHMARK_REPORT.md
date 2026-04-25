@@ -1,34 +1,3 @@
-![ezgif-2d9a27bbde0f19aa](https://github.com/user-attachments/assets/f6d19d6a-45bb-4223-88a1-635ddde4717a)
-
-**Direct Download Link:**
-[fish_model.pt](https://stpubtenakanclyw.blob.core.windows.net/marine-detect/models2025/FishInv.pt)
-
-Download karke project folder mein rakh do aur naam `fish_model.pt` rakh do.
-
-**2. SS-UIE Enhancement Model (Optional)**
-
-**Download:**
-[SS_UIE.pth (79 MB)](https://drive.google.com/file/d/1YxyagMCbApON8dRdiQTaQG65g3tnZkPt/view?usp=sharing)
-
-**Rename to:**  
-`SS_UIE.pth`
-
-**Place in:** root directory (same folder as `main.py`)
-
-**Note:**  
-Pipeline works perfectly without this model. Classical enhancement is used as automatic fallback.
-
-
-![test_0032_compare](https://github.com/user-attachments/assets/e54e07ee-195e-4c78-bf02-dd5450522e56)
-
-
-![test_0013_compare](https://github.com/user-attachments/assets/3c5b73cc-bf6d-4d92-9b29-fd97be1f451b)
-
-![76787070_0](https://github.com/user-attachments/assets/e025fc0a-4c1b-46ae-a767-b8c97b2e5861)
-
-
-<br><br>
-
 <div align="center">
 
 # UNDERWATER IMAGE ENHANCEMENT & SPECIES DETECTION
@@ -177,7 +146,7 @@ To combat color bleeding, we unfroze the model and added explicit color and edge
 - $L_{color}$ computes the Mean Absolute Error of the channel means and standard deviations, forcing the network to exactly match the global color distribution of the target.
 - **Input Distribution:** We mixed 19% raw hazy images into the preprocessed training batches to force the model to handle edge-cases where the classical preprocessor fails.
 
-![Training Curves](./assets/training_curves.png)
+![Training Curves](file:///C:/Users/athar/.gemini/antigravity/brain/610f40cf-09bf-4c8a-807b-9c11393c6cc8/training_curves.png)
 
 > [!TIP]
 > The early stopping trigger at epoch 31 in Phase 2 confirms the model reached the maximum representational capacity of the dataset, achieving a peak validation PSNR of 22.62 dB.
@@ -188,7 +157,7 @@ To combat color bleeding, we unfroze the model and added explicit color and edge
 
 This section compares our final deployed model against literature baselines on standard underwater paired datasets.
 
-![Benchmark Comparison](./assets/benchmark_comparison.png)
+![Benchmark Comparison](file:///C:/Users/athar/.gemini/antigravity/brain/610f40cf-09bf-4c8a-807b-9c11393c6cc8/benchmark_comparison.png)
 
 ### Metric Interpretation
 - **PSNR (Peak Signal-to-Noise Ratio):** Our model pushes the PSNR to 22.62 dB. While some massive GAN-based models in literature claim >25 dB, they often hallucinate textures that harm YOLO detection. Our model provides the highest mathematically honest reconstruction fidelity.
@@ -210,15 +179,15 @@ Where $\alpha$ is dynamically computed based on the **Hasler & Süsstrunk Colorf
 
 #### Scene 1: Deep Water (Test 3)
 In deep water, the classical preprocessor fails to recover lost reds. The Neural network (NAFNet) successfully hallucinates the lost spectrum. The fusion guard recognizes the neural output is *more* colorful than the input and keeps $\alpha$ high.
-![Deep Water Fusion](./assets/grid_test3.png)
+![Deep Water Fusion](file:///C:/Users/athar/.gemini/antigravity/brain/610f40cf-09bf-4c8a-807b-9c11393c6cc8/grid_test3.png)
 
 #### Scene 2: Coral Reef (Test 2)
 In this shallow scene, the classical preprocessor already yields excellent results. The raw NAFNet output incorrectly blue-washes the image, destroying the greens and yellows. The Colorfulness Fusion Guard detects this massive drop in color variance, drops $\alpha$, and relies heavily on the classical output, successfully saving the image.
-![Coral Reef Fusion](./assets/grid_test2.png)
+![Coral Reef Fusion](file:///C:/Users/athar/.gemini/antigravity/brain/610f40cf-09bf-4c8a-807b-9c11393c6cc8/grid_test2.png)
 
 #### Scene 3: Subject Close-up (Test 0013)
 Here, the neural network mildly sharpens the subject without destroying colors. The fusion guard balances both inputs perfectly.
-![Fish Fusion](./assets/grid_test_0013.png)
+![Fish Fusion](file:///C:/Users/athar/.gemini/antigravity/brain/610f40cf-09bf-4c8a-807b-9c11393c6cc8/grid_test_0013.png)
 
 ---
 

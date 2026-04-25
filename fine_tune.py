@@ -57,7 +57,7 @@ def parse_args():
                         help="fine-tune learning rate")
     parser.add_argument("--min-lr", type=float, default=1e-6,
                         help="cosine scheduler minimum LR")
-    parser.add_argument("--preproc-prob", type=float, default=0.7,
+    parser.add_argument("--preproc-prob", type=float, default=0.8,
                         help="probability of training on preprocessed input")
     parser.add_argument("--val-preproc-prob", type=float, default=1.0,
                         help="validation input probability; 1.0 matches inference")
@@ -247,8 +247,8 @@ def main():
     criterion = CombinedLoss(
         w_l1=0.45,
         w_ssim=0.35,
-        w_grad=0.15,
-        w_color=0.05,
+        w_grad=0.10,
+        w_color=0.10,
         w_percep=0.0,
     ).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=5e-5)
@@ -258,7 +258,7 @@ def main():
     print(f"Parameters      : {total:,}")
     print(f"Device          : {device}")
     print(f"Fine-tune epochs: {args.epochs}  |  Batch: {args.batch_size}  |  LR: {args.lr}")
-    print(f"Loss            : 0.45 L1 + 0.35 SSIM + 0.15 edge + 0.05 color")
+    print(f"Loss            : 0.45 L1 + 0.35 SSIM + 0.10 edge + 0.10 color")
     print(f"Output best     : {output_path}")
     print(f"Log             : {log_path}")
 
