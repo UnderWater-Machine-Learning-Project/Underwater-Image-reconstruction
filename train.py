@@ -115,7 +115,7 @@ class UnderwaterDataset(Dataset):
 
 
     def _random_crop(self, hazy, clear, size):
-        # cropping only (fast)
+        # Crop both images with the same coordinates to preserve pair alignment.
         h, w = hazy.shape[:2]
         top = np.random.randint(0, h - size + 1) if h > size else 0
         left = np.random.randint(0, w - size + 1) if w > size else 0
@@ -128,6 +128,16 @@ class UnderwaterDataset(Dataset):
         left = (w - size) // 2 if w > size else 0
         return (hazy [top:top+size, left:left+size],
                 clear[top:top+size, left:left+size])
+
+    def _resize_short_edge(self, hazy, clear, size):
+        h, w = hazy.shape[:2]
+        if min(h, w) >= size:
+            return hazy, clear
+        scale = size / max(1, min(h, w))
+        new_w = max(size, int(round(w * scale)))
+        new_h = max(size, int(round(h * scale)))
+        return (cv2.resize(hazy,  (new_w, new_h), interpolation=cv2.INTER_AREA),
+                cv2.resize(clear, (new_w, new_h), interpolation=cv2.INTER_AREA))
 
     def _color_jitter(self, img):
         """Random brightness/contrast shift — applied to hazy input only."""
@@ -171,11 +181,19 @@ class UnderwaterDataset(Dataset):
         inp   = self._load(hp, is_hazy=not use_preproc)
         clear = self._load(cp, is_hazy=False)
 
-        # Single fast resize to uniform size (images are ~288-512px, not uniform)
-        inp   = cv2.resize(inp,   (self.img_size, self.img_size))
-        clear = cv2.resize(clear, (self.img_size, self.img_size))
+        # Match clear to the selected input resolution, then crop. This avoids
+        # squeezing wide underwater frames into square images during training.
+        if clear.shape[:2] != inp.shape[:2]:
+            clear = cv2.resize(clear, (inp.shape[1], inp.shape[0]),
+                               interpolation=cv2.INTER_AREA)
+        inp, clear = self._resize_short_edge(inp, clear, self.img_size)
+
         if self.augment:
             inp, clear = self._augment(inp, clear)
+            inp, clear = self._random_crop(inp, clear, self.img_size)
+        else:
+            inp, clear = self._center_crop(inp, clear, self.img_size)
+
         inp_t   = torch.from_numpy(inp.astype(np.float32)   / 255.0).permute(2, 0, 1)
         clear_t = torch.from_numpy(clear.astype(np.float32) / 255.0).permute(2, 0, 1)
         return inp_t, clear_t

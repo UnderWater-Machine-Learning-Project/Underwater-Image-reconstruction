@@ -20,6 +20,8 @@ __pycache__/
 # ===============================
 outputs/
 results/
+runs/
+Ultralytics/
 *.jpg
 *.png
 

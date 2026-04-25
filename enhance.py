@@ -1,19 +1,11 @@
 """
-Underwater Image Enhancement Pipeline
-======================================
-Stage 1 — Classical preprocessing  : preprocess.py  (WB → UDCP → CLAHE → Sharpen)
-Stage 2 — Neural enhancement       : NAFNet + ViT Bottleneck
-Stage 3 — Post-processing          : bilateral denoise + saturation restore
+Underwater image enhancement pipeline.
 
-Train-inference consistency:
-    preprocess.py is the SAME module used by preprocess_dataset.py to prepare
-    the training dataset. The NAFNet therefore sees the same input distribution
-    at inference time as it did during training.
-
-Usage:
-    from enhance import enhance, load_model
-    bundle = load_model("weights/nafnet_final.pth")
-    enhanced_bgr = enhance(raw_bgr, bundle)
+Stages:
+    1. Classical preprocessing from preprocess.py
+    2. NAFNet + ViT neural enhancement, if weights are available
+    3. Quality-aware fusion (colorfulness + color-shift guards)
+    4. Light denoise and mild saturation guard
 """
 
 import cv2
@@ -23,42 +15,33 @@ import torch
 from preprocess import preprocess as classical_preprocess
 
 
-# ── Model loader ───────────────────────────────────────────────────────────────
-
 def load_model(weights_path: str):
-    """
-    Load trained NAFNet + ViT checkpoint.
-
-    Returns:
-        (model, device) tuple on success, None on failure.
-    """
+    """Load a trained NAFNet + ViT checkpoint."""
     try:
         from nafnet_vit import nafnet_vit_small
+
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model  = nafnet_vit_small().to(device)
-        state  = torch.load(weights_path, map_location=device)
+        model = nafnet_vit_small().to(device)
+        state = torch.load(weights_path, map_location=device)
         model.load_state_dict(state, strict=True)
         model.eval()
-        print(f"NAFNet loaded  ({device})  ←  {weights_path}")
+        print(f"NAFNet loaded  ({device})  <-  {weights_path}")
         return model, device
     except Exception as e:
         print(f"[warn] NAFNet load failed: {e}")
         return None
 
 
-# ── Neural inference ───────────────────────────────────────────────────────────
-
 def _infer(bundle, img_bgr: np.ndarray) -> np.ndarray:
     """
-    NAFNet forward pass.
-    Pads H and W to multiples of 16, runs inference, crops padding back off.
-    Input/output: uint8 BGR.
+    Run NAFNet on a uint8 BGR image.
+
+    Pads H and W to multiples of 16, runs inference, then crops the padding.
     """
     model, device = bundle
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    h, w    = img_rgb.shape[:2]
+    h, w = img_rgb.shape[:2]
 
-    # Pad to multiple of 16
     ph = (16 - h % 16) % 16
     pw = (16 - w % 16) % 16
     if ph or pw:
@@ -69,24 +52,45 @@ def _infer(bundle, img_bgr: np.ndarray) -> np.ndarray:
         out = model(t)
 
     out_np = out.squeeze(0).cpu().numpy().transpose(1, 2, 0)[:h, :w]
-    return cv2.cvtColor((np.clip(out_np, 0, 1) * 255).astype(np.uint8),
-                        cv2.COLOR_RGB2BGR)
+    out_u8 = (np.clip(out_np, 0, 1) * 255).astype(np.uint8)
+    return cv2.cvtColor(out_u8, cv2.COLOR_RGB2BGR)
 
 
-# ── Post-processing ────────────────────────────────────────────────────────────
+def _colorfulness(img_bgr: np.ndarray) -> float:
+    """
+    Hasler & Süsstrunk colorfulness metric.
+
+    Measures how diverse and saturated the colors are. Higher = more colorful.
+    Typical ranges:
+        Monotone blue underwater  :  5–15
+        Moderate reef scene       : 20–35
+        Healthy colorful reef     : 35–60+
+
+    Reference: Hasler, D. & Süsstrunk, S. (2003). "Measuring Colourfulness
+    in Natural Images." SPIE Human Vision and Electronic Imaging.
+    """
+    B = img_bgr[:, :, 0].astype(np.float32)
+    G = img_bgr[:, :, 1].astype(np.float32)
+    R = img_bgr[:, :, 2].astype(np.float32)
+
+    rg = R - G
+    yb = 0.5 * (R + G) - B
+
+    std_root = np.sqrt(rg.std() ** 2 + yb.std() ** 2)
+    mean_root = np.sqrt(rg.mean() ** 2 + yb.mean() ** 2)
+    return float(std_root + 0.3 * mean_root)
+
 
 def _post_process(img_bgr: np.ndarray, orig_bgr: np.ndarray) -> np.ndarray:
     """
-    Bilateral denoise + saturation restore.
+    Light denoise plus conservative saturation correction.
 
-    Bilateral filter preserves edges while smoothing compression artefacts.
-    Saturation boost is proportional to detected blue/green cast — deeper
-    images get more saturation recovery, shallow ones get less.
+    The neural model should do the restoration. This stage only smooths tiny
+    compression noise and avoids the heavy HSV boost that made some outputs
+    look artificially warm or over-processed.
     """
-    # Bilateral denoise
-    out = cv2.bilateralFilter(img_bgr, d=5, sigmaColor=25, sigmaSpace=25)
+    out = cv2.bilateralFilter(img_bgr, d=3, sigmaColor=15, sigmaSpace=15)
 
-    # Saturation restore — scale based on original cast ratio
     b_m = float(orig_bgr[:, :, 0].mean())
     g_m = float(orig_bgr[:, :, 1].mean())
     r_m = float(orig_bgr[:, :, 2].mean())
@@ -94,63 +98,95 @@ def _post_process(img_bgr: np.ndarray, orig_bgr: np.ndarray) -> np.ndarray:
         min((b_m / max(r_m, 1.0)) / 2.0, 1.0),
         min((g_m / max(r_m, 1.0)) / 2.0, 1.0),
     )
+
     hsv = cv2.cvtColor(out, cv2.COLOR_BGR2HSV).astype(np.float32)
-    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1.10 + 0.15 * cast), 0, 255)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1.02 + 0.06 * cast), 0, 255)
     return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
 
-# ── Master entry point ─────────────────────────────────────────────────────────
+def _fusion_weight(neural_bgr: np.ndarray, pre_bgr: np.ndarray) -> float:
+    """
+    Choose how much neural output to trust.
+
+    Uses three guards:
+        1. Red-shift guard — detects when neural output adds warm/magenta cast
+        2. Brightness guard — detects when neural output darkens the scene
+        3. Colorfulness guard — detects when neural output washes out color
+           diversity (blue-washing on reef scenes, monotone deep-water outputs)
+
+    Returns a weight in [0.0, 0.65] for the neural branch.
+    """
+    n = neural_bgr.astype(np.float32).mean(axis=(0, 1)) + 1.0
+    p = pre_bgr.astype(np.float32).mean(axis=(0, 1)) + 1.0
+
+    # Guard 1: red/magenta shift
+    neural_red_ratio = n[2] / max(n[1], 1.0)
+    pre_red_ratio = p[2] / max(p[1], 1.0)
+    red_jump = neural_red_ratio > pre_red_ratio + 0.30 and n[2] > p[2] * 1.12
+    blue_drop = n[0] < p[0] * 0.88
+
+    # Guard 2: brightness drop
+    dark_drop = neural_bgr.mean() < pre_bgr.mean() * 0.88
+
+    # Guard 3: colorfulness loss
+    cf_neural = _colorfulness(neural_bgr)
+    cf_pre = _colorfulness(pre_bgr)
+    color_loss = cf_neural < cf_pre * 0.70          # neural lost >30% color diversity
+    pre_already_good = cf_pre > 30.0                # input already has healthy color
+
+    if red_jump and blue_drop:
+        return 0.20
+    if color_loss:
+        # Neural is destroying color — minimal trust
+        return 0.15
+    if dark_drop:
+        return 0.45
+    if pre_already_good and cf_neural < cf_pre * 0.90:
+        # Input is colorful and neural is slightly dulling it — reduce trust
+        return 0.35
+    if pre_already_good:
+        # Input is already good — conservative blend
+        return 0.45
+    return 0.65
+
 
 def enhance(img_bgr: np.ndarray, bundle=None) -> np.ndarray:
     """
-    Full enhancement pipeline.
+    Enhance one BGR image.
 
-    Stage 1: Classical preprocessing — same as training input preparation.
-             (Gray World WB → UDCP → CLAHE → Unsharp Mask)
-    Stage 2: NAFNet + ViT neural enhancement.
-             Falls back to classical-only if no model is loaded.
-    Stage 3: Bilateral denoise + saturation restore.
-
-    Safety guard: if the enhanced output is significantly darker than the
-    original (mean < 75% of original), returns the classical-only result.
-
-    Args:
-        img_bgr : uint8 BGR image, any resolution.
-        bundle  : (model, device) from load_model(), or None for classical only.
-
-    Returns:
-        Enhanced uint8 BGR image, same resolution as input.
+    Returns the same resolution as the input.
     """
     orig = img_bgr.copy()
-
-    # Stage 1: Classical preprocessing (same module as training dataset prep)
     preprocessed = classical_preprocess(img_bgr)
 
-    # Stage 2: Neural enhancement
+    neural = None
     if bundle is not None:
         try:
             neural = _infer(bundle, preprocessed)
         except Exception as e:
             print(f"  [warn] NAFNet inference failed: {e}")
-            neural = None
-    else:
-        neural = None
 
     if neural is not None:
-        # Blend: 70% neural, 30% preprocessed classical baseline
+        w = _fusion_weight(neural, preprocessed)
         fused = np.clip(
-            0.70 * neural.astype(np.float32) +
-            0.30 * preprocessed.astype(np.float32),
-            0, 255
+            w * neural.astype(np.float32)
+            + (1.0 - w) * preprocessed.astype(np.float32),
+            0,
+            255,
         ).astype(np.uint8)
     else:
         fused = preprocessed
 
-    # Stage 3: Post-processing
     fused = _post_process(fused, orig)
 
-    # Safety: don't return a result darker than 75% of the original
+    # Fallback: if enhancement degraded brightness, use classical result
     if fused.mean() < orig.mean() * 0.75:
+        return preprocessed
+
+    # Fallback: if enhancement washed out color vs. classical preprocessing
+    cf_fused = _colorfulness(fused)
+    cf_pre = _colorfulness(preprocessed)
+    if cf_fused < cf_pre * 0.60:
         return preprocessed
 
     return fused

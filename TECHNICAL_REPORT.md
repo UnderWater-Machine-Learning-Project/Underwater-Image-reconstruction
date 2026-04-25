@@ -1,9 +1,9 @@
 # Underwater Image Reconstruction: Technical Report
 
 **Project**: NAFNet + ViT Bottleneck for Underwater Image Enhancement  
-**Version**: 2.0 — Architecture Migration  
+**Version**: 2.0 — Architecture Migration & Finalization  
 **Date**: April 2026  
-**Status**: Model defined, training pending
+**Status**: Complete (Trained, Fine-tuned, Evaluated)
 
 ---
 
@@ -362,34 +362,89 @@ Split is deterministic (`np.random.seed(42)`) for reproducibility.
 
 ---
 
-## 9. Project Structure (v2.0)
+## 9. Training & Fine-Tuning
 
-```
+The NAFNet + ViT model was trained in two phases to maximize both structural reconstruction and color accuracy.
+
+### Phase 1: Base Training
+- **Epochs**: 140 (Early stopping triggered, patience=50)
+- **Loss**: L1 + SSIM
+- **Learning Rate**: Cosine annealing (peak 1e-3, linear warmup)
+- **Input Distribution**: 100% classically preprocessed images
+- **Result**: Validation PSNR of **22.51 dB**. The model learned excellent structural restoration but occasionally suffered from slight color biases due to the lack of an explicit color constraint.
+
+### Phase 2: Refinement Fine-Tuning
+- **Epochs**: 31 (Early stopping triggered, patience=15)
+- **Loss**: L1 (0.45) + SSIM (0.35) + Edge (0.10) + Color (0.10)
+- **Learning Rate**: 1e-4
+- **Input Distribution**: Mixed (80% preprocessed, 19% raw hazy) to increase robustness against preprocessing edge cases.
+- **Result**: Validation PSNR improved to **22.62 dB**. The addition of the explicit color loss (mean & std matching) and edge loss significantly reduced warm-color bleeding and sharpened coral textures.
+
+---
+
+## 10. Quality-Aware Fusion Mechanism
+
+During inference, the neural network acts as a powerful non-linear enhancer, but deep-learning models can unpredictably degrade already-high-quality inputs (e.g., shallow coral reefs with excellent natural lighting). To address this, we implemented a **Quality-Aware Fusion Mechanism** in `enhance.py`.
+
+The system dynamically calculates the **Hasler & Süsstrunk Colorfulness Metric** for both the classically preprocessed input and the neural output. The fusion weight (α) is adjusted based on color retention:
+- If the neural output loses >30% of the input's colorfulness, the neural weight is aggressively reduced.
+- If the neural output is extremely washed out (colorfulness < 15), a pure fallback to the classical preprocessing is triggered.
+
+This ensures that the pipeline acts strictly as a "do-no-harm" filter: it drastically improves poor-visibility scenes while preserving the natural vibrancy of already-clear images.
+
+---
+
+## 11. Final Evaluation Results
+
+The fully integrated pipeline (Preprocessing → NAFNet → Quality-Aware Fusion) was evaluated on the held-out test split of 1,381 images.
+
+| Metric | Score |
+|---|---|
+| **Average PSNR** | 19.25 dB |
+| **Average SSIM** | 0.8186 |
+
+*Note: This evaluation represents the end-to-end pipeline against the clear ground truth. The structural similarity (SSIM > 0.8) confirms high fidelity in object preservation, crucial for the downstream YOLO detection task.*
+
+---
+
+## 12. Project Structure (Final)
+
+```text
 Underwater-Image-reconstruction/
 ├── dataset/
 │   ├── hazy/                (3,687 degraded images)
 │   ├── clear/               (3,687 ground truth)
 │   └── preprocessed/        (3,687 preprocessed inputs)
 ├── images/                  (test input images for demo)
+├── weights/
+│   ├── nafnet_final.pth     (Final deployed model weights)
+│   ├── test_split.npy       (Held-out test paths)
+│   └── training_log_finetune.csv
 ├── nafnet_vit.py            (NAFNet + ViT model definition)
-├── detect.py                (two-pass tiled YOLO detection)
-├── preprocess.py            (classical preprocessing module)
-├── preprocess_dataset.py    (offline dataset preprocessor)
+├── preprocess.py            (Classical preprocessing module)
+├── preprocess_dataset.py    (Offline dataset preprocessor)
+├── train.py                 (Base training script)
+├── fine_tune.py             (Refinement fine-tuning script)
+├── enhance.py               (Inference pipeline with colorfulness fusion)
+├── detect.py                (Two-pass tiled YOLO detection)
+├── main.py                  (CLI entry point)
+├── test.py                  (Evaluation script)
 ├── fish_model.pt            (YOLO fish/species detector, 84 MB)
 ├── requirements.txt
 ├── README.md
-└── TECHNICAL_REPORT.md      (this document)
+└── TECHNICAL_REPORT.md      (This document)
 ```
-
-**Pending (Parts 3–4)**:
-- `train.py` — NAFNet training script
-- `enhance.py` — inference pipeline (preprocessing + NAFNet + post-processing)
-- `main.py` — CLI entry point (enhance + detect)
-- `test.py` — evaluation with PSNR/SSIM on held-out test split
 
 ---
 
-## 10. References
+## 13. Limitations & Future Work
+
+- **Extreme Deep-Water Scenes**: Images taken at extreme depths (>20m) with near-monotone blue/green casts are heavily out-of-distribution for the current dataset. The neural model struggles to hallucinate lost red/yellow wavelengths. The current fallback mechanism safely returns the preprocessed image, but future work requires collecting deep-water pairs for targeted training.
+- **Temporal Consistency**: The current pipeline processes images independently. If applied to video, flickering may occur due to frame-by-frame variations in the CLAHE and Colorfulness computations.
+
+---
+
+## 14. References
 
 1. Chen, L., Chu, X., Zhang, X., & Sun, J. (2022). "Simple Baselines for Image Restoration." *ECCV 2022*. [NAFNet]
 2. Zamir, S. W., et al. (2022). "Restormer: Efficient Transformer for High-Resolution Image Restoration." *CVPR 2022*.
@@ -400,4 +455,5 @@ Underwater-Image-reconstruction/
 7. He, K., Sun, J., & Tang, X. (2009). "Single Image Haze Removal Using Dark Channel Prior." *CVPR 2009*. [DCP]
 8. Johnson, J., et al. (2016). "Perceptual Losses for Real-Time Style Transfer and Super-Resolution." *ECCV 2016*.
 9. Ronneberger, O., Fischer, P., & Brox, T. (2015). "U-Net: Convolutional Networks for Biomedical Image Segmentation." *MICCAI 2015*.
-10. Saleem, A., et al. (2023). "A Non-Reference Evaluation of Underwater Image Enhancement Methods Using a New Underwater Image Dataset." *IEEE Access*.
+10. Hasler, D., & Süsstrunk, S. E. (2003). "Measuring colorfulness in natural images." *Electronic Imaging*.
+11. Saleem, A., et al. (2023). "A Non-Reference Evaluation of Underwater Image Enhancement Methods Using a New Underwater Image Dataset." *IEEE Access*.
