@@ -144,7 +144,7 @@ To combat color bleeding, we unfroze the model and added explicit color and edge
 - $L_{color}$ computes the Mean Absolute Error of the channel means and standard deviations, forcing the network to exactly match the global color distribution of the target.
 - **Input Distribution:** We mixed 19% raw hazy images into the preprocessed training batches to force the model to handle edge-cases where the classical preprocessor fails.
 
-![Training Curves](./assets/training_curves.png)
+<img src="./assets/training_curves.png" width="100%" alt="Training Curves">
 
 > [!TIP]
 > The early stopping trigger at epoch 31 in Phase 2 confirms the model reached the maximum representational capacity of the dataset, achieving a peak validation PSNR of 22.62 dB.
@@ -155,7 +155,7 @@ To combat color bleeding, we unfroze the model and added explicit color and edge
 
 This section compares our final deployed model against literature baselines on standard underwater paired datasets.
 
-![Benchmark Comparison](./assets/benchmark_comparison.png)
+<img src="./assets/benchmark_comparison.png" width="100%" alt="Benchmark Comparison">
 
 ### Metric Interpretation
 - **PSNR (Peak Signal-to-Noise Ratio):** Our model pushes the PSNR to 22.62 dB. While some massive GAN-based models in literature claim >25 dB, they often hallucinate textures that harm YOLO detection. Our model provides the highest mathematically honest reconstruction fidelity.
@@ -175,17 +175,20 @@ Where $\alpha$ is dynamically computed based on the **Hasler & Süsstrunk Colorf
 
 ### Visual Ablation Panels
 
+<img src="./assets/grid_master.png" width="100%" alt="Master Academic Comparison Grid">
+
+
 #### Scene 1: Deep Water (Test 3)
 In deep water, the classical preprocessor fails to recover lost reds. The Neural network (NAFNet) successfully hallucinates the lost spectrum. The fusion guard recognizes the neural output is *more* colorful than the input and keeps $\alpha$ high.
-![Deep Water Fusion](./assets/grid_test3.png)
+
 
 #### Scene 2: Coral Reef (Test 2)
 In this shallow scene, the classical preprocessor already yields excellent results. The raw NAFNet output incorrectly blue-washes the image, destroying the greens and yellows. The Colorfulness Fusion Guard detects this massive drop in color variance, drops $\alpha$, and relies heavily on the classical output, successfully saving the image.
-![Coral Reef Fusion](./assets/grid_test2.png)
+
 
 #### Scene 3: Subject Close-up (Test 0013)
 Here, the neural network mildly sharpens the subject without destroying colors. The fusion guard balances both inputs perfectly.
-![Fish Fusion](./assets/grid_test_0013.png)
+
 
 ---
 
