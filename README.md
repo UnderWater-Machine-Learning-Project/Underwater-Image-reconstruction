@@ -16,7 +16,7 @@
 | **Training Pairs** | 13,815 |
 | **Model Size** | ~19.8M Parameters |
 
-</div>
+
 
 ---
 
